@@ -95,8 +95,13 @@ def handler(job):
         res = {'formato': formato, 'bytes': len(dados), 'modelo_em_cache': em_cache,
                'preparo_modelo_s': round(t1 - t0, 1), 'total_s': round(time.time() - t0, 1), 'resumo': resumo}
         if e.get('upload_url'):
+            info = {k: res[k] for k in ('modelo_em_cache', 'preparo_modelo_s', 'total_s')}
+            info.update({k: resumo.get(k) for k in ('device', 'render_s', 'cor', 'espelhadas')})
+            info['resolucao'] = [w, h]
+            info['amostras'] = int(cena.get('amostras', 128))
             req = urllib.request.Request(e['upload_url'], data=dados, method='PUT',
-                                         headers={'Content-Type': 'image/png' if formato == 'png' else 'image/jpeg'})
+                                         headers={'Content-Type': 'image/png' if formato == 'png' else 'image/jpeg',
+                                                  'X-Resumo': json.dumps(info)})
             urllib.request.urlopen(req, timeout=300).close()
             res['enviado'] = True
         else:

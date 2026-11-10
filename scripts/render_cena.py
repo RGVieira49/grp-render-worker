@@ -523,6 +523,7 @@ W, H = cfg['resolucao']
 expo = cfg.get('exposicao')
 ganhos = (1.0, 1.0, 1.0)
 medida = {}
+medida_balanco = {}
 if expo is None or cfg.get('balanco_auto', 0.4) > 0:
     r = sc.render
     r.resolution_x, r.resolution_y = 480, max(16, round(480 * H / W))
@@ -556,12 +557,17 @@ if expo is None or cfg.get('balanco_auto', 0.4) > 0:
         neutros = (croma < 0.25) & (Y > p30) & dentro
         if neutros.sum() > 200:
             mr, mg, mb = rgb[neutros].mean(0)
+            # dominante = quanto o "branco" está quente (ambiente fechado, só com spots de 3000 K) ou frio;
+            # dominante leve → correção leve (mantém o clima); dominante forte → corrige quase tudo
+            dominante = float(max(mr, mb) / max(min(mr, mb), 1e-5))
             k = cfg.get('balanco_auto', 0.4)
-            ganhos = tuple(float(np.clip((mg / max(v, 1e-5)) ** k, 0.8, 1.25)) for v in (mr, mg, mb))
-    medida = dict(chave=round(chave, 4), p97=round(p97, 4))
+            k = float(np.clip(k + max(0.0, dominante - 1.12) * 2.5, k, 0.9))
+            ganhos = tuple(float(np.clip((mg / max(v, 1e-5)) ** k, 0.7, 1.35)) for v in (mr, mg, mb))
+            medida_balanco = dict(dominante=round(dominante, 3), forca=round(k, 2))
+    medida = dict(chave=round(chave, 4), p97=round(p97, 4), **medida_balanco)
     bpy.data.images.remove(im)
 # Um toque de calor, como a foto de interiores de lançamento (a luz do céu deixa tudo levemente azulado)
-calor = cfg.get('calor', 0.03)
+calor = cfg.get('calor', 0.03) if medida_balanco.get('dominante', 1.0) < 1.12 else 0.0
 ganhos = (ganhos[0] * (1 + calor), ganhos[1], ganhos[2] * (1 - calor * 1.3))
 cy.samples = cfg.get('amostras', 128)
 cy.adaptive_threshold = cfg.get('limiar_ruido', 0.01)

@@ -36,6 +36,15 @@ RUN curl -fsSL -o /opt/ceu/jardim_4k.hdr \
         https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/4k/pretoria_gardens_4k.hdr \
     && echo "${JARDIM_SHA256}  /opt/ceu/jardim_4k.hdr" | sha256sum -c -
 
+# Texturas físicas CC0 (Poly Haven): carvalho, laminado, linho, bouclé, suede — no lugar das texturas
+# pequenas que o SketchUp exporta (300–600 px). Cada arquivo conferido pelo sha256 do texturas.txt.
+COPY texturas.txt /tmp/texturas.txt
+RUN mkdir -p /opt/texturas \
+    && grep -v '^#' /tmp/texturas.txt | while read url sha nome; do \
+         curl -fsSL -A "grp-render/1.0" -o "/opt/texturas/$nome" "$url" \
+         && echo "$sha  /opt/texturas/$nome" | sha256sum -c - || exit 1; \
+       done
+
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir runpod==1.12.0
 
 COPY handler.py /app/handler.py

@@ -96,7 +96,8 @@ def handler(job):
                'preparo_modelo_s': round(t1 - t0, 1), 'total_s': round(time.time() - t0, 1), 'resumo': resumo}
         if e.get('upload_url'):
             info = {k: res[k] for k in ('modelo_em_cache', 'preparo_modelo_s', 'total_s')}
-            info.update({k: resumo.get(k) for k in ('device', 'render_s', 'cor', 'espelhadas')})
+            info.update({k: resumo.get(k) for k in ('device', 'render_s', 'cor', 'espelhadas', 'exposicao', 'balanco', 'luz', 'spots')})
+            info['texturas_trocadas'] = len(resumo.get('texturas_trocadas', []))
             info['resolucao'] = [w, h]
             info['amostras'] = int(cena.get('amostras', 128))
             req = urllib.request.Request(e['upload_url'], data=dados, method='PUT',

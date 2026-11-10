@@ -1,0 +1,16 @@
+# Texturas físicas CC0 da Poly Haven (polyhaven.com, licença CC0): url sha256 nome
+https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/laminate_floor_02/laminate_floor_02_diff_4k.jpg 9138b055cea1d8ac0e5c19ee588cf2d402cf42e61cbdacf9c77d5cc69667aff0 laminate_floor_02_diff.jpg
+https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/laminate_floor_02/laminate_floor_02_nor_gl_4k.jpg 541f10b5f2256918230eb980c4d9c275a3fd3ea00d541a2ac3e07283d0d1637a laminate_floor_02_nor.jpg
+https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/laminate_floor_02/laminate_floor_02_rough_4k.jpg 0a01b6f5481eb3eb537b8e7371a847177b95e44724f5fe2f1091e7ef87e8fb9e laminate_floor_02_rough.jpg
+https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/oak_veneer_01/oak_veneer_01_diff_4k.jpg 7e8c64811e580ef6664c20524606359c739e6fe030eff5c2c06c3482ecc8b1cf oak_veneer_01_diff.jpg
+https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/oak_veneer_01/oak_veneer_01_nor_gl_4k.jpg e9bb26f63682773895ce3f0dfd9a43554a719c4caae65b6bcf41712ecfaf3d26 oak_veneer_01_nor.jpg
+https://dl.polyhaven.org/file/ph-assets/Textures/jpg/4k/oak_veneer_01/oak_veneer_01_rough_4k.jpg 3e7eb00705c173babfc01443de1ed1e8d40d055b97de278a6e817b65e8decb38 oak_veneer_01_rough.jpg
+https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_linen/rough_linen_diff_2k.jpg e71016e08dfebea1dd4e8a2a675e3b617a889a782af782f1abb795906f4db1b4 rough_linen_diff.jpg
+https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_linen/rough_linen_nor_gl_2k.jpg c5733ad50cfe0f90c546f3d4076590c1c78a4fd1a83c967cc9c92dc8175b99e6 rough_linen_nor.jpg
+https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/rough_linen/rough_linen_rough_2k.jpg 48400d48fa203882bf5d984d5beb2f95edb1550309924601c018f2c4f3f80731 rough_linen_rough.jpg
+https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/scuba_suede/scuba_suede_diff_2k.jpg 9c0b3ed2ffc4862c571940b139680ac6f612041b9454bbddff21f90dc027033c scuba_suede_diff.jpg
+https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/scuba_suede/scuba_suede_nor_gl_2k.jpg 3bce1a0272cacffcd8f7414fb679a0ea27944b9b82dab5165a6dd079d6eda871 scuba_suede_nor.jpg
+https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/scuba_suede/scuba_suede_rough_2k.jpg fc43e105b4cffb5246753d7cbf43bb2cda79c084bd159daf28ce8cfa82573a30 scuba_suede_rough.jpg
+https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/wool_boucle/wool_boucle_diff_2k.jpg 4776e044f74963c2e93d5ca85a53307cb3946c290c6dd397711b119536e4046a wool_boucle_diff.jpg
+https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/wool_boucle/wool_boucle_nor_gl_2k.jpg ec411e071e64cc84f83f51e12a74922c4a3429d07f4cad7387141a05fcc4a9e7 wool_boucle_nor.jpg
+https://dl.polyhaven.org/file/ph-assets/Textures/jpg/2k/wool_boucle/wool_boucle_rough_2k.jpg 3b7e40007d85d78b3ad572708388bd7cbd9e7b07f5f91bdac85654614d4aa7ee wool_boucle_rough.jpg

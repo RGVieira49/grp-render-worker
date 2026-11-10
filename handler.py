@@ -88,8 +88,11 @@ def handler(job):
         arq = os.path.join(pasta, 'cena.json')
         with open(arq, 'w') as f:
             json.dump(cena, f)
-        log = rodar([BLENDER, '-b', blend, '-P', f'{SCRIPTS}/render_cena.py', '--', arq])
-        resumo = json.loads(re.search(r'^RESUMO (.*)$', log, re.M).group(1))
+        log = rodar([BLENDER, '-b', blend, '--python-exit-code', '1', '-P', f'{SCRIPTS}/render_cena.py', '--', arq])
+        achado = re.search(r'^RESUMO (.*)$', log, re.M)
+        if not achado:
+            raise RuntimeError(f'o script de render não terminou: {log[-3000:]}')
+        resumo = json.loads(achado.group(1))
         with open(saida, 'rb') as f:
             dados = f.read()
         res = {'formato': formato, 'bytes': len(dados), 'modelo_em_cache': em_cache,

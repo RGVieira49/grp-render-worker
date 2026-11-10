@@ -555,6 +555,9 @@ if expo is None or cfg.get('balanco_auto', 0.4) > 0:
         croma = (rgb.max(1) - rgb.min(1)) / np.maximum(Y, 1e-4)
         p30 = np.percentile(Y, 30)
         neutros = (croma < 0.25) & (Y > p30) & dentro
+        if neutros.sum() <= 200:
+            # sob luz bem quente, até a parede branca sai "colorida": aceita croma maior entre os tons claros
+            neutros = (croma < 0.6) & (Y > np.percentile(Y, 50)) & dentro
         if neutros.sum() > 200:
             mr, mg, mb = rgb[neutros].mean(0)
             # dominante = quanto o "branco" está quente (ambiente fechado, só com spots de 3000 K) ou frio;

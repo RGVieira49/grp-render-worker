@@ -6,6 +6,8 @@ Entrada do job:
     cena           câmera, sol, resolução, amostras… (o mesmo JSON de scripts/render_cena.py, sem "saida")
     formato        "jpg" (padrão, volta em base64) ou "png"
     upload_url     opcional; se vier, o arquivo final vai por PUT para esse link (URL assinada)
+
+Na cena, "paisagem" escolhe o que aparece pelas janelas: "jardim" (padrão) ou "ceu".
 """
 import base64, hashlib, json, os, re, shutil, subprocess, tempfile, time, urllib.request
 
@@ -13,7 +15,8 @@ import runpod
 
 BLENDER = '/opt/blender/blender'
 SCRIPTS = '/app/scripts'
-CEU = '/opt/ceu/ceu_4k.hdr'
+# fundos fotográficos CC0 embutidos na imagem; a cena escolhe pelo nome, nunca por caminho
+PAISAGENS = {'jardim': '/opt/ceu/jardim_4k.hdr', 'ceu': '/opt/ceu/ceu_4k.hdr'}
 # volume de rede da RunPod quando montado; senão, disco do próprio worker
 CACHE = '/runpod-volume/modelos' if os.path.isdir('/runpod-volume') else '/tmp/modelos'
 
@@ -70,6 +73,8 @@ def handler(job):
     if not (64 <= w <= 8192 and 64 <= h <= 8192) or not (1 <= int(cena.get('amostras', 128)) <= 4096):
         return {'error': 'resolucao ou amostras fora do limite'}
     formato = 'png' if e.get('formato') == 'png' else 'jpg'
+    if e.get('upload_url') and not str(e['upload_url']).startswith('https://'):
+        return {'error': 'upload_url precisa ser um link https'}
 
     t0 = time.time()
     blend, em_cache = preparar_modelo(e['modelo_url'], e.get('modelo_sha256'))
@@ -79,7 +84,7 @@ def handler(job):
     try:
         saida = os.path.join(pasta, f'render.{formato}')
         cena = dict(cena, saida=saida, formato=formato.upper().replace('JPG', 'JPEG'))
-        cena.setdefault('ceu_foto', CEU)
+        cena['ceu_foto'] = PAISAGENS.get(cena.pop('paisagem', 'jardim'), PAISAGENS['jardim'])
         arq = os.path.join(pasta, 'cena.json')
         with open(arq, 'w') as f:
             json.dump(cena, f)

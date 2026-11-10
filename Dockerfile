@@ -30,6 +30,12 @@ RUN mkdir -p /opt/ceu \
         https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/4k/kloofendal_48d_partly_cloudy_puresky_4k.hdr \
     && echo "${CEU_SHA256}  /opt/ceu/ceu_4k.hdr" | sha256sum -c -
 
+# Jardim com árvores (Poly Haven, pretoria_gardens, 4K, CC0): o que se vê pelas janelas do decorado
+ARG JARDIM_SHA256=e0ab5ccc71616365835f4fc98b391d242dbe2577107265f848100e610b08f13c
+RUN curl -fsSL -o /opt/ceu/jardim_4k.hdr \
+        https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/4k/pretoria_gardens_4k.hdr \
+    && echo "${JARDIM_SHA256}  /opt/ceu/jardim_4k.hdr" | sha256sum -c -
+
 RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir runpod==1.12.0
 
 COPY handler.py /app/handler.py

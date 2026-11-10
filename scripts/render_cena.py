@@ -564,7 +564,7 @@ if expo is None or cfg.get('balanco_auto', 0.4) > 0:
             # dominante leve → correção leve (mantém o clima); dominante forte → corrige quase tudo
             dominante = float(max(mr, mb) / max(min(mr, mb), 1e-5))
             k = cfg.get('balanco_auto', 0.4)
-            k = float(np.clip(k + max(0.0, dominante - 1.12) * 2.5, k, 0.9))
+            k = float(np.clip(k + max(0.0, dominante - 1.12) * 2.5, k, 0.75))  # guarda um pouco do calor
             ganhos = tuple(float(np.clip((mg / max(v, 1e-5)) ** k, 0.7, 1.35)) for v in (mr, mg, mb))
             medida_balanco = dict(dominante=round(dominante, 3), forca=round(k, 2))
     medida = dict(chave=round(chave, 4), p97=round(p97, 4), **medida_balanco)

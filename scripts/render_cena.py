@@ -523,7 +523,7 @@ W, H = cfg['resolucao']
 expo = cfg.get('exposicao')
 ganhos = (1.0, 1.0, 1.0)
 medida = {}
-if expo is None or cfg.get('balanco_auto', 0.6) > 0:
+if expo is None or cfg.get('balanco_auto', 0.4) > 0:
     r = sc.render
     r.resolution_x, r.resolution_y = 480, max(16, round(480 * H / W))
     r.resolution_percentage = 100
@@ -550,16 +550,19 @@ if expo is None or cfg.get('balanco_auto', 0.6) > 0:
         # meio-tom do ambiente em ~0,32 (linear) sem passar 0,95 nos 3% mais claros
         expo = min(math.log2(cfg.get('chave_alvo', 0.32) / chave), math.log2(0.95 / max(p97, 1e-4)) + 0.6)
         expo = max(-4.0, min(6.0, expo)) + cfg.get('exposicao_ajuste', 0.0)
-    if cfg.get('balanco_auto', 0.6) > 0:
+    if cfg.get('balanco_auto', 0.4) > 0:
         croma = (rgb.max(1) - rgb.min(1)) / np.maximum(Y, 1e-4)
         p30 = np.percentile(Y, 30)
         neutros = (croma < 0.25) & (Y > p30) & dentro
         if neutros.sum() > 200:
             mr, mg, mb = rgb[neutros].mean(0)
-            k = cfg.get('balanco_auto', 0.6)
+            k = cfg.get('balanco_auto', 0.4)
             ganhos = tuple(float(np.clip((mg / max(v, 1e-5)) ** k, 0.8, 1.25)) for v in (mr, mg, mb))
     medida = dict(chave=round(chave, 4), p97=round(p97, 4))
     bpy.data.images.remove(im)
+# Um toque de calor, como a foto de interiores de lançamento (a luz do céu deixa tudo levemente azulado)
+calor = cfg.get('calor', 0.03)
+ganhos = (ganhos[0] * (1 + calor), ganhos[1], ganhos[2] * (1 - calor * 1.3))
 cy.samples = cfg.get('amostras', 128)
 cy.adaptive_threshold = cfg.get('limiar_ruido', 0.01)
 sc.view_settings.exposure = expo

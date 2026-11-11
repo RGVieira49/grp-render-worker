@@ -9,8 +9,11 @@ Entrada do job:
     imagem_url    link https do render (assinado, expira)
     upload_url    link https (assinado, uso único) para devolver o JPEG por PUT
     escala        1.0 a 2.0 (padrão 1.5: 4K → 5760×3240; 2.0 → 8K)
-    forca         intensidade do refino, 0.15 a 0.45 (padrão 0.3: baixa criação)
-    detalhe       força do ControlNet Tile, 0.5 a 1.0 (padrão 0.8)
+    forca         intensidade do refino, 0.15 a 0.65 (padrão 0.5, calibrado no Kala em 11/11)
+    detalhe       força do ControlNet Tile, 0.5 a 1.0 (padrão 0.6)
+    guia          CFG, 2 a 10 (padrão 7)
+    fidelidade    0 a 1: quanto dos meios-tons volta do render (padrão 0.3; ver recombinar.py)
+    contraste     ganho máximo do contraste local, 1.0 a 2.0 (padrão 1.5: tira o "véu" da IA)
     passos, semente, prompt_extra   opcionais
 
 Modelos (licenças comerciais): RealVisXL V5.0 (openrail++), xinsir/controlnet-tile-sdxl-1.0 (Apache-2.0),
@@ -24,21 +27,21 @@ os.environ.setdefault('HF_HUB_DISABLE_TELEMETRY', '1')
 
 import numpy as np
 import torch
-import torch.nn.functional as F
-import torchvision.transforms.functional as TF
 from PIL import Image
 from diffusers import (AutoencoderKL, ControlNetModel, DPMSolverMultistepScheduler,
                        StableDiffusionXLControlNetImg2ImgPipeline)
 import runpod
 from huggingface_hub import snapshot_download
+from recombinar import recombinar
 
 BASE = ('SG161222/RealVisXL_V5.0', 'ac93e0dda1f6d448cae19bbfab8c5e720a5e48bc')
 TILE = ('xinsir/controlnet-tile-sdxl-1.0', '1ae8d9529efe58f7362a987363ff86a7904dc84f')
 VAE = ('madebyollin/sdxl-vae-fp16-fix', '207b116dae70ace3637169f1ddd2434b91b3a8cd')
 
 PROMPT = ('professional architectural interior photograph, high-end real estate photography, shot on full-frame camera, '
-          'natural soft daylight, physically accurate materials, fine natural wood grain, visible fabric weave, '
-          'matte paint with subtle texture, crisp sharp details, true-to-life colors, photorealistic')
+          'natural soft daylight, physically accurate materials, fine natural wood veneer grain, visible fabric weave, '
+          'linen and boucle upholstery texture, matte paint with subtle texture, crisp sharp details, true-to-life colors, '
+          'photorealistic')
 NEGATIVE = ('cgi, 3d render, rendering, cartoon, illustration, painting, drawing, plastic, waxy, smooth flat surfaces, '
             'blurry, soft focus, noise, jpeg artifacts, oversaturated, text, letters, logo, brand, watermark, '
             'people, person, distorted, deformed')
@@ -86,7 +89,7 @@ def baixar(url):
         return r.read()
 
 
-def ampliar(img, escala, forca, detalhe, passos, semente, prompt, guia=5.0):
+def ampliar(img, escala, forca, detalhe, passos, semente, prompt, guia=7.0, fidelidade=0.3, contraste=1.5):
     W0, H0 = img.size
     W, H = round(W0 * escala), round(H0 * escala)
     base = img.resize((W, H), Image.LANCZOS) if (W, H) != (W0, H0) else img
@@ -110,15 +113,9 @@ def ampliar(img, escala, forca, detalhe, passos, semente, prompt, guia=5.0):
             acc[y:y + lh, x:x + lw] += np.asarray(saida, np.float32) * w
             peso[y:y + lh, x:x + lw] += w
     res = acc / np.maximum(peso, 1e-6)
-    # Luz e cor do render (frequências baixas) + detalhe da IA (frequências altas)
-    fator = max(8, round(16 * escala))  # "frequência baixa" = o que sobra numa versão 1/16 do tamanho
-    def borrar(a):
-        t = torch.from_numpy(a).permute(2, 0, 1)[None].cuda()
-        p = F.interpolate(t, size=(max(1, H // fator), max(1, W // fator)), mode='area')
-        p = TF.gaussian_blur(p, [5, 5], [1.0, 1.0])
-        return F.interpolate(p, size=(H, W), mode='bicubic', align_corners=False)[0].permute(1, 2, 0).cpu().numpy()
-    res = res - borrar(res) + borrar(ref)
-    return Image.fromarray(np.clip(res + 0.5, 0, 255).astype(np.uint8)), len(xs) * len(ys)
+    # Luz e cor do render + detalhe da IA, com o contraste local de volta (recombinar.py)
+    out = recombinar(res, ref, escala, fidelidade=fidelidade, ganho_max=contraste, dispositivo='cuda')
+    return Image.fromarray(out), len(xs) * len(ys)
 
 
 def handler(job):
@@ -127,10 +124,12 @@ def handler(job):
         if not str(e.get(k, '')).startswith('https://'):
             return {'error': f'{k} precisa ser um link https'}
     escala = float(min(max(float(e.get('escala', 1.5)), 1.0), 2.0))
-    forca = float(min(max(float(e.get('forca', 0.3)), 0.15), 0.65))
-    detalhe = float(min(max(float(e.get('detalhe', 0.8)), 0.5), 1.0))
+    forca = float(min(max(float(e.get('forca', 0.5)), 0.15), 0.65))
+    detalhe = float(min(max(float(e.get('detalhe', 0.6)), 0.5), 1.0))
+    fidelidade = float(min(max(float(e.get('fidelidade', 0.3)), 0.0), 1.0))
+    contraste = float(min(max(float(e.get('contraste', 1.5)), 1.0), 2.0))
     passos = int(min(max(int(e.get('passos', 30)), 12), 60))
-    guia = float(min(max(float(e.get('guia', 5.0)), 2.0), 10.0))
+    guia = float(min(max(float(e.get('guia', 7.0)), 2.0), 10.0))
     semente = int(e.get('semente', 20261110))
     prompt = PROMPT + (', ' + str(e['prompt_extra'])[:300] if e.get('prompt_extra') else '')
 
@@ -139,11 +138,12 @@ def handler(job):
     if img.size[0] * escala > 8192 or img.size[1] * escala > 8192:
         return {'error': 'resultado passaria de 8192 px'}
     with torch.inference_mode():
-        out, ladrilhos = ampliar(img, escala, forca, detalhe, passos, semente, prompt, guia)
+        out, ladrilhos = ampliar(img, escala, forca, detalhe, passos, semente, prompt, guia, fidelidade, contraste)
     buf = io.BytesIO()
     out.save(buf, 'JPEG', quality=95, subsampling=0)
     dados = buf.getvalue()
     info = {'ampliador': True, 'escala': escala, 'forca': forca, 'detalhe': detalhe, 'passos': passos, 'guia': guia,
+            'fidelidade': fidelidade, 'contraste': contraste,
             'ladrilhos': ladrilhos, 'carga_modelos_s': t_carga, 'total_s': round(time.time() - t0, 1),
             'resolucao': list(out.size), 'device': torch.cuda.get_device_name(0)}
     req = urllib.request.Request(e['upload_url'], data=dados, method='PUT',

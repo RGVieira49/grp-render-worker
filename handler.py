@@ -9,7 +9,7 @@ Entrada do job:
 
 Na cena, "paisagem" escolhe o que aparece pelas janelas: "jardim" (padrão) ou "ceu".
 """
-import base64, hashlib, json, os, re, shutil, subprocess, tempfile, time, urllib.request
+import base64, hashlib, json, os, re, shutil, subprocess, tempfile, time, urllib.parse, urllib.request
 
 import runpod
 
@@ -55,6 +55,32 @@ def preparar_modelo(url, sha):
     return blend, False
 
 
+# Biblioteca de materiais (CC0): mapas em 2K baixados uma vez para o volume, só das fontes oficiais
+BIBLIOTECA = os.path.join(os.path.dirname(CACHE), 'biblioteca')
+FONTES = {'dl.polyhaven.org', 'f003.backblazeb2.com'}
+
+
+def preparar_biblioteca(pedido):
+    pronto = {}
+    for ident, item in (pedido or {}).items():
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', ident) or not isinstance(item, dict):
+            continue
+        pasta = os.path.join(BIBLIOTECA, ident)
+        os.makedirs(pasta, exist_ok=True)
+        for nome in ('cor', 'normal', 'rugosidade'):
+            url = str(item.get('mapas', {}).get(nome, ''))
+            if urllib.parse.urlparse(url).scheme != 'https' or urllib.parse.urlparse(url).hostname not in FONTES:
+                raise ValueError(f'mapa fora das fontes da biblioteca: {ident}/{nome}')
+            destino = os.path.join(pasta, f'{nome}.jpg')
+            if not os.path.exists(destino):
+                req = urllib.request.Request(url, headers={'User-Agent': 'grp-render/1.0'})
+                with urllib.request.urlopen(req, timeout=300) as r, open(destino + '.parcial', 'wb') as f:
+                    shutil.copyfileobj(r, f)
+                os.replace(destino + '.parcial', destino)
+        pronto[ident] = {'dir': pasta, 'metros': float(item.get('metros', 1.0)), 'normal_dx': bool(item.get('normal_dx'))}
+    return pronto
+
+
 def rodar(cmd):
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode != 0:
@@ -85,6 +111,8 @@ def handler(job):
         saida = os.path.join(pasta, f'render.{formato}')
         cena = dict(cena, saida=saida, formato=formato.upper().replace('JPG', 'JPEG'))
         cena['ceu_foto'] = PAISAGENS.get(cena.pop('paisagem', 'jardim'), PAISAGENS['jardim'])
+        cena['biblioteca'] = preparar_biblioteca(cena.get('biblioteca'))
+        cena.pop('texturas_dir', None)  # caminhos locais só o próprio trabalhador decide
         arq = os.path.join(pasta, 'cena.json')
         with open(arq, 'w') as f:
             json.dump(cena, f)

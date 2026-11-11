@@ -3,6 +3,7 @@
 # v4: texturas finas (CC0) no lugar das texturas pequenas do SketchUp, vidro que deixa a luz passar,
 #     exposição e balanço de branco medidos numa prévia (como o fotômetro da câmera), presets de luz e 4K.
 import bpy, bmesh, sys, os, json, math, re, time, tempfile
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 from mathutils import Vector
 
@@ -59,29 +60,10 @@ if cfg.get('suavizar', True):
 # ---------------------------------------------------------------- 2. materiais por classe
 # O SketchUp exporta tudo com rugosidade 0,5, sem metal e com texturas de 300–600 px. Cada material
 # ganha uma classe (pelo nome, ou pela lista "materiais" da cena, que vence) e a classe diz o acabamento.
-CLASSES = [
-    (r'vidro|glass|translucent|cristal', 'vidro'),
-    (r'espelho|mirror', 'espelho'),
-    (r'a[çc]o\b|inox|cromad|chrome|metal|alum[ií]n|steel|lat[ãa]o|dourad|gold|bronze|cobre|niquel', 'metal'),
-    (r'piso.*(lamin|madeira|vin[ií]l)|assoalho|parquet|taco', 'piso_madeira'),
-    (r'madeira|wood|mdf|carvalho|freij[óo]|nogueira|louro|cumaru|ripad|amadeir|lamin|ver?niz|lâmina', 'madeira'),
-    (r'boucl', 'boucle'),
-    (r'suede|camur|veludo|velvet', 'suede'),
-    (r'tapete|\brug\b|carpet|地毯', 'tapete'),
-    (r'linho|tecido|fabric|algod|almofad|cortina|curtain|manta|len[çc]ol|sof[áa]|estofad', 'tecido'),
-    (r'couro|leather', 'couro'),
-    (r'queimado', 'cimento_queimado'),
-    (r'porcelanat|m[áa]rmore|marble|granit|quartz|travertin|silestone|dekton|pedra', 'pedra'),
-    (r'cer[âa]mic|azulej|\btile|pastilha|subway|decortiles|brut', 'ceramica'),
-    (r'grafiato|textura|reboco|stucco|concreto|concrete|cimento', 'textura_parede'),
-    (r'laca|laqu|lacad', 'laca'),
-    (r'acr[ií]lic|pl[áa]stic', 'plastico'),
-    (r'folha|leaf|planta|plant|vegeta', 'planta'),
-    (r'pintura|tinta|suvinil|coral|parede|wall|gesso|forro|lume|color', 'pintura'),
-]
+from regras_materiais import CLASSES, classe_pelo_nome  # noqa: E402  (mesmas regras do visualizador)
 # rugosidade base e relevo (tirado da própria textura) de cada classe
 ACABAMENTO = {
-    'vidro': dict(rug=0.02), 'espelho': dict(rug=0.02), 'metal': dict(rug=0.3),
+    'vidro': dict(rug=0.02), 'espelho': dict(rug=0.02), 'metal': dict(rug=0.38),
     'piso_madeira': dict(rug=0.38), 'madeira': dict(rug=0.42, verniz=0.12),
     'boucle': dict(rug=0.95, brilho_tecido=0.5), 'suede': dict(rug=0.8, brilho_tecido=0.7),
     'tapete': dict(rug=0.95, brilho_tecido=0.4), 'tecido': dict(rug=0.92, brilho_tecido=0.4),
@@ -101,17 +83,20 @@ FINAS = {
     'boucle': dict(base='wool_boucle', metros=0.31, trocar=False, normal=0.9),
     'suede': dict(base='scuba_suede', metros=0.28, trocar=False, normal=0.5),
 }
+# "materiais" na cena: { nome: "classe" } ou { nome: { classe?, biblioteca?, cor?, brilho?, relevo?, escala?, rotacao? } }
+# (o painel de materiais do visualizador grava o segundo formato)
 SOBREPOR = cfg.get('materiais', {})
+AJUSTES = {k: v for k, v in SOBREPOR.items() if isinstance(v, dict)}
+BIBLIOTECA = cfg.get('biblioteca', {})  # id → { dir, metros, normal_dx } (o trabalhador baixa os mapas)
 
 
 def classe_de(nome):
-    if nome in SOBREPOR:
-        return SOBREPOR[nome]
-    n = nome.lower()
-    for padrao, c in CLASSES:
-        if re.search(padrao, n):
-            return c
-    return 'outro'
+    v = SOBREPOR.get(nome)
+    if isinstance(v, str):
+        return v
+    if isinstance(v, dict) and v.get('classe'):
+        return v['classe']
+    return classe_pelo_nome(nome)
 
 
 _imagens, _medias = {}, {}
@@ -168,10 +153,11 @@ def metros_por_repeticao(m):
     return amostras[len(amostras) // 2]
 
 
-def coordenada(nt, tex_original, escala):
+def coordenada(nt, tex_original, escala, rotacao=0.0):
     """UV do material (a mesma orientação que o arquiteto deu) multiplicada pela escala da textura fina."""
     mapa = nt.nodes.new('ShaderNodeMapping')
     mapa.inputs['Scale'].default_value = (escala, escala, 1)
+    mapa.inputs['Rotation'].default_value[2] = math.radians(rotacao)
     if tex_original and tex_original.inputs['Vector'].is_linked:
         nt.links.new(tex_original.inputs['Vector'].links[0].from_socket, mapa.inputs['Vector'])
     else:
@@ -194,6 +180,117 @@ def vidro_passa_luz(m):
     nt.links.new(origem, mix.inputs[1])
     nt.links.new(tr.outputs['BSDF'], mix.inputs[2])
     nt.links.new(mix.outputs['Shader'], saida.inputs['Surface'])
+
+
+def _img(caminho, cor):
+    im = bpy.data.images.load(caminho, check_existing=True)
+    im.colorspace_settings.name = 'sRGB' if cor else 'Non-Color'
+    return im
+
+
+def _hex(cor):
+    c = str(cor).lstrip('#')
+    if len(c) != 6:
+        return None
+    srgb = [int(c[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+    return tuple(v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in srgb)
+
+
+def aplicar_biblioteca(m, nt, pr, tex, aj, lib):
+    """Material da biblioteca (Poly Haven / ambientCG, 2K) no lugar do material do SketchUp."""
+    escala = max(0.05, float(aj.get('escala', 1.0)))
+    orig_m = metros_por_repeticao(m)
+    if orig_m:  # o mapeamento que o arquiteto deu (direção do veio) com o tamanho real da textura
+        vetor = coordenada(nt, tex, orig_m / (lib['metros'] * escala), float(aj.get('rotacao', 0)))
+        caixa = False
+    else:  # peça sem mapeamento útil: projeção "em caixa" nas coordenadas do objeto, em metros
+        tc = nt.nodes.new('ShaderNodeTexCoord')
+        mapa = nt.nodes.new('ShaderNodeMapping')
+        k = 1.0 / (lib['metros'] * escala)
+        mapa.inputs['Scale'].default_value = (k, k, k)
+        mapa.inputs['Rotation'].default_value[2] = math.radians(float(aj.get('rotacao', 0)))
+        nt.links.new(tc.outputs['Object'], mapa.inputs['Vector'])
+        vetor = mapa.outputs['Vector']
+        caixa = True
+    def tex_lib(nome, cor):
+        t = nt.nodes.new('ShaderNodeTexImage')
+        t.image = _img(os.path.join(lib['dir'], f'{nome}.jpg'), cor)
+        if caixa:
+            t.projection = 'BOX'
+            t.projection_blend = 0.25
+        nt.links.new(vetor, t.inputs['Vector'])
+        return t
+    cor_t = tex_lib('cor', True)
+    saida_cor = cor_t.outputs['Color']
+    tinta = _hex(aj['cor']) if aj.get('cor') else None
+    if tinta and tinta != (1.0, 1.0, 1.0):
+        mult = nt.nodes.new('ShaderNodeMix')
+        mult.data_type = 'RGBA'
+        mult.blend_type = 'MULTIPLY'
+        mult.inputs['Factor'].default_value = 1.0
+        nt.links.new(saida_cor, mult.inputs[6])
+        mult.inputs[7].default_value = (*tinta, 1)
+        saida_cor = mult.outputs[2]
+    nt.links.new(saida_cor, pr.inputs['Base Color'])
+    nor_t = tex_lib('normal', False)
+    saida_nor = nor_t.outputs['Color']
+    if lib.get('normal_dx'):  # DirectX → OpenGL: inverte o verde
+        sep = nt.nodes.new('ShaderNodeSeparateColor')
+        inv = nt.nodes.new('ShaderNodeMath')
+        inv.operation = 'SUBTRACT'
+        inv.inputs[0].default_value = 1.0
+        jun = nt.nodes.new('ShaderNodeCombineColor')
+        nt.links.new(saida_nor, sep.inputs['Color'])
+        nt.links.new(sep.outputs[1], inv.inputs[1])
+        nt.links.new(sep.outputs[0], jun.inputs[0])
+        nt.links.new(inv.outputs['Value'], jun.inputs[1])
+        nt.links.new(sep.outputs[2], jun.inputs[2])
+        saida_nor = jun.outputs['Color']
+    nm = nt.nodes.new('ShaderNodeNormalMap')
+    nm.inputs['Strength'].default_value = 0.8 * float(aj.get('relevo', 1.0))
+    nt.links.new(saida_nor, nm.inputs['Color'])
+    nt.links.new(nm.outputs['Normal'], pr.inputs['Normal'])
+    rug_t = tex_lib('rugosidade', False)
+    if aj.get('brilho') is not None:  # 0 fosco … 1 brilhante, com a variação da própria textura
+        alvo = 1.0 - 0.95 * float(aj['brilho'])
+        faixa = nt.nodes.new('ShaderNodeMapRange')
+        faixa.inputs['To Min'].default_value = max(alvo - 0.12, 0.02)
+        faixa.inputs['To Max'].default_value = min(alvo + 0.12, 1.0)
+        nt.links.new(rug_t.outputs['Color'], faixa.inputs['Value'])
+        nt.links.new(faixa.outputs['Result'], pr.inputs['Roughness'])
+    else:
+        nt.links.new(rug_t.outputs['Color'], pr.inputs['Roughness'])
+
+
+def aplicar_ajustes(nt, pr, aj):
+    """Ajustes do painel sobre um material que continua o do projeto: cor, brilho, relevo."""
+    tinta = _hex(aj['cor']) if aj.get('cor') else None
+    if tinta and tinta != (1.0, 1.0, 1.0):
+        if pr.inputs['Base Color'].is_linked:
+            origem = pr.inputs['Base Color'].links[0].from_socket
+            mult = nt.nodes.new('ShaderNodeMix')
+            mult.data_type = 'RGBA'
+            mult.blend_type = 'MULTIPLY'
+            mult.inputs['Factor'].default_value = 1.0
+            nt.links.new(origem, mult.inputs[6])
+            mult.inputs[7].default_value = (*tinta, 1)
+            nt.links.new(mult.outputs[2], pr.inputs['Base Color'])
+        else:
+            pr.inputs['Base Color'].default_value = (*tinta, 1)
+    if aj.get('brilho') is not None:
+        alvo = 1.0 - 0.95 * float(aj['brilho'])
+        ligado = pr.inputs['Roughness'].links[0].from_node if pr.inputs['Roughness'].is_linked else None
+        if ligado is not None and ligado.type == 'MAP_RANGE':
+            ligado.inputs['To Min'].default_value = max(alvo - 0.12, 0.02)
+            ligado.inputs['To Max'].default_value = min(alvo + 0.12, 1.0)
+        else:
+            if ligado is not None:
+                nt.links.remove(pr.inputs['Roughness'].links[0])
+            pr.inputs['Roughness'].default_value = alvo
+    if aj.get('relevo') is not None and pr.inputs['Normal'].is_linked:
+        n = pr.inputs['Normal'].links[0].from_node
+        if 'Strength' in n.inputs:
+            n.inputs['Strength'].default_value *= float(aj['relevo'])
 
 
 contagem, trocadas = {}, []
@@ -242,10 +339,16 @@ for m in bpy.data.materials:
         pr.inputs['Coat Weight'].default_value = p['verniz']
         pr.inputs['Coat Roughness'].default_value = 0.3
 
+    aj = AJUSTES.get(m.name, {})
+    lib = BIBLIOTECA.get(aj.get('biblioteca')) if aj.get('biblioteca') else None
+    if lib and lib.get('dir'):
+        aplicar_biblioteca(m, nt, pr, tex, aj, lib)
+        trocadas.append(m.name)
+        continue
     fina = FINAS.get(cl) if cfg.get('texturas_finas', True) else None
     if fina and tex:
         orig_m = metros_por_repeticao(m) or fina['metros']
-        vetor = coordenada(nt, tex, orig_m / fina['metros'])
+        vetor = coordenada(nt, tex, orig_m / (fina['metros'] * max(0.05, float(aj.get('escala', 1.0)))), float(aj.get('rotacao', 0)))
         grande = min(tex.image.size) >= 1500  # textura do arquiteto já é fina: a cor dele fica
         if fina['trocar'] and not grande:
             diff = nt.nodes.new('ShaderNodeTexImage')
@@ -333,6 +436,8 @@ for m in bpy.data.materials:
     pr = next((n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED'), None)
     if not pr or pr.inputs['Roughness'].is_linked or pr.inputs['Transmission Weight'].default_value > 0.5:
         continue
+    if classe_de(m.name) in ('metal', 'espelho') or pr.inputs['Metallic'].default_value > 0.5:
+        continue  # em metal, a variação vira mancha de "água" no reflexo
     r = pr.inputs['Roughness'].default_value
     coord = nt.nodes.new('ShaderNodeTexCoord')
     ruido = nt.nodes.new('ShaderNodeTexNoise')
@@ -346,6 +451,15 @@ for m in bpy.data.materials:
     nt.links.new(coord.outputs['Object'], ruido.inputs['Vector'])
     nt.links.new(ruido.outputs['Fac'], faixa.inputs['Value'])
     nt.links.new(faixa.outputs['Result'], pr.inputs['Roughness'])
+
+# Ajustes do painel de materiais (cor, brilho, relevo) por último: valem sobre tudo o que veio antes.
+for m in bpy.data.materials:
+    aj = AJUSTES.get(m.name)
+    if not aj or not m.use_nodes or (aj.get('biblioteca') and BIBLIOTECA.get(aj['biblioteca'], {}).get('dir')):
+        continue
+    pr = next((n for n in m.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+    if pr:
+        aplicar_ajustes(m.node_tree, pr, aj)
 
 # ---------------------------------------------------------------- 3. luz
 # Presets de fotógrafo; "sol" na cena (elevação/azimute/força) ainda vale por cima do preset.
@@ -660,13 +774,14 @@ if ganhos != (1.0, 1.0, 1.0):
     wb.inputs[7].default_value = (*ganhos, 1)
     ultimo = wb.outputs[2]
 if pos.get('ligado', True):
-    glare = N.new('CompositorNodeGlare')
-    glare.inputs['Type'].default_value = 'Bloom'
-    glare.inputs['Threshold'].default_value = pos.get('brilho_limiar', 1.5)
-    glare.inputs['Strength'].default_value = pos.get('brilho', 0.2)
-    glare.inputs['Size'].default_value = pos.get('brilho_tamanho', 0.6)
-    L.new(ultimo, glare.inputs['Image'])
-    ultimo = glare.outputs['Image']
+    if pos.get('brilho', 0.0) > 0:  # "brilho em volta da luz" (bloom): desligado por padrão, estoura os metais
+        glare = N.new('CompositorNodeGlare')
+        glare.inputs['Type'].default_value = 'Bloom'
+        glare.inputs['Threshold'].default_value = pos.get('brilho_limiar', 1.5)
+        glare.inputs['Strength'].default_value = pos['brilho']
+        glare.inputs['Size'].default_value = pos.get('brilho_tamanho', 0.6)
+        L.new(ultimo, glare.inputs['Image'])
+        ultimo = glare.outputs['Image']
     if pos.get('temperatura'):
         cb = N.new('CompositorNodeColorBalance')
         cb.inputs['Type'].default_value = 'White Point'

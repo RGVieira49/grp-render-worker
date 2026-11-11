@@ -86,7 +86,7 @@ def baixar(url):
         return r.read()
 
 
-def ampliar(img, escala, forca, detalhe, passos, semente, prompt):
+def ampliar(img, escala, forca, detalhe, passos, semente, prompt, guia=5.0):
     W0, H0 = img.size
     W, H = round(W0 * escala), round(H0 * escala)
     base = img.resize((W, H), Image.LANCZOS) if (W, H) != (W0, H0) else img
@@ -100,7 +100,7 @@ def ampliar(img, escala, forca, detalhe, passos, semente, prompt):
             pedaco = base.crop((x, y, x + lw, y + lh))
             g = torch.Generator('cuda').manual_seed(semente)  # mesma semente: o "grão" casa entre ladrilhos
             saida = pipe(prompt=prompt, negative_prompt=NEGATIVE, image=pedaco, control_image=pedaco,
-                         strength=forca, num_inference_steps=passos, guidance_scale=5.0,
+                         strength=forca, num_inference_steps=passos, guidance_scale=guia,
                          controlnet_conditioning_scale=detalhe, generator=g).images[0]
             ax = (xs[xi - 1] + lw - x) if xi > 0 else 0
             dx = (x + lw - xs[xi + 1]) if xi < len(xs) - 1 else 0
@@ -127,9 +127,10 @@ def handler(job):
         if not str(e.get(k, '')).startswith('https://'):
             return {'error': f'{k} precisa ser um link https'}
     escala = float(min(max(float(e.get('escala', 1.5)), 1.0), 2.0))
-    forca = float(min(max(float(e.get('forca', 0.3)), 0.15), 0.45))
+    forca = float(min(max(float(e.get('forca', 0.3)), 0.15), 0.65))
     detalhe = float(min(max(float(e.get('detalhe', 0.8)), 0.5), 1.0))
     passos = int(min(max(int(e.get('passos', 30)), 12), 60))
+    guia = float(min(max(float(e.get('guia', 5.0)), 2.0), 10.0))
     semente = int(e.get('semente', 20261110))
     prompt = PROMPT + (', ' + str(e['prompt_extra'])[:300] if e.get('prompt_extra') else '')
 
@@ -138,11 +139,11 @@ def handler(job):
     if img.size[0] * escala > 8192 or img.size[1] * escala > 8192:
         return {'error': 'resultado passaria de 8192 px'}
     with torch.inference_mode():
-        out, ladrilhos = ampliar(img, escala, forca, detalhe, passos, semente, prompt)
+        out, ladrilhos = ampliar(img, escala, forca, detalhe, passos, semente, prompt, guia)
     buf = io.BytesIO()
     out.save(buf, 'JPEG', quality=95, subsampling=0)
     dados = buf.getvalue()
-    info = {'ampliador': True, 'escala': escala, 'forca': forca, 'detalhe': detalhe, 'passos': passos,
+    info = {'ampliador': True, 'escala': escala, 'forca': forca, 'detalhe': detalhe, 'passos': passos, 'guia': guia,
             'ladrilhos': ladrilhos, 'carga_modelos_s': t_carga, 'total_s': round(time.time() - t0, 1),
             'resolucao': list(out.size), 'device': torch.cuda.get_device_name(0)}
     req = urllib.request.Request(e['upload_url'], data=dados, method='PUT',

@@ -8,13 +8,18 @@ Entrada do job:
     upload_url     opcional; se vier, o arquivo final vai por PUT para esse link (URL assinada)
 
 Na cena, "paisagem" escolhe o que aparece pelas janelas: "jardim" (padrão) ou "ceu".
+
+Versão leve (acao = "versao_leve"): em vez de renderizar, gera o .glb leve do visualizador 3D (scripts/previa.py)
+e a ficha dos materiais, e entrega os dois por PUT:
+    modelo_url, modelo_sha256   como acima (o .blend importado fica no cache e serve aos renders seguintes)
+    upload_glb, upload_ficha    links assinados do Estúdio
 """
 import base64, hashlib, json, os, re, shutil, subprocess, tempfile, time, urllib.parse, urllib.request
 
 import runpod
 
-BLENDER = '/opt/blender/blender'
-SCRIPTS = '/app/scripts'
+BLENDER = os.environ.get('GRP_BLENDER', '/opt/blender/blender')
+SCRIPTS = os.environ.get('GRP_SCRIPTS', '/app/scripts')
 # fundos fotográficos CC0 embutidos na imagem; a cena escolhe pelo nome, nunca por caminho
 PAISAGENS = {'jardim': '/opt/ceu/jardim_4k.hdr', 'ceu': '/opt/ceu/ceu_4k.hdr'}
 # volume de rede da RunPod quando montado; senão, disco do próprio worker
@@ -88,10 +93,44 @@ def rodar(cmd):
     return p.stdout
 
 
+def enviar(url, caminho, tipo, resumo=None):
+    cab = {'Content-Type': tipo, 'Content-Length': str(os.path.getsize(caminho))}
+    if resumo:
+        cab['X-Resumo'] = json.dumps(resumo)
+    with open(caminho, 'rb') as f:
+        urllib.request.urlopen(urllib.request.Request(url, data=f, method='PUT', headers=cab), timeout=600).close()
+
+
+def versao_leve(e, t0):
+    for k in ('upload_glb', 'upload_ficha'):
+        if not str(e.get(k, '')).startswith('https://'):
+            return {'error': f'{k} precisa ser um link https'}
+    blend, em_cache = preparar_modelo(e['modelo_url'], e.get('modelo_sha256'))
+    t1 = time.time()
+    pasta = tempfile.mkdtemp()
+    try:
+        saida = os.path.join(pasta, 'leve.glb')
+        log = rodar([BLENDER, '-b', blend, '--python-exit-code', '1', '-P', f'{SCRIPTS}/previa.py', '--', saida])
+        achado = re.search(r'^PREVIA (.*)$', log, re.M)
+        ficha = os.path.join(pasta, 'leve.materiais_info.json')
+        if not achado or not os.path.exists(saida) or not os.path.exists(ficha):
+            raise RuntimeError(f'a versão leve não terminou: {log[-3000:]}')
+        resumo = json.loads(achado.group(1))
+        info = {'modelo_em_cache': em_cache, 'preparo_modelo_s': round(t1 - t0, 1), 'total_s': round(time.time() - t0, 1),
+                'bytes': os.path.getsize(saida), **{k: resumo.get(k) for k in ('objetos', 'removidos', 'simplificadas', 'materiais', 'raio_limpeza_m')}}
+        enviar(e['upload_ficha'], ficha, 'application/json')
+        enviar(e['upload_glb'], saida, 'model/gltf-binary', info)  # por último: a chegada do .glb fecha o trabalho
+        return {'acao': 'versao_leve', **info, 'resumo': resumo}
+    finally:
+        shutil.rmtree(pasta, ignore_errors=True)
+
+
 def handler(job):
     e = job['input']
     if not isinstance(e.get('modelo_url'), str) or not e['modelo_url'].startswith('https://'):
         return {'error': 'modelo_url precisa ser um link https'}
+    if e.get('acao') == 'versao_leve':
+        return versao_leve(e, time.time())
     cena = e.get('cena')
     if not isinstance(cena, dict) or 'camera' not in cena or 'resolucao' not in cena:
         return {'error': 'cena precisa de camera e resolucao'}
@@ -143,4 +182,5 @@ def handler(job):
         shutil.rmtree(pasta, ignore_errors=True)
 
 
-runpod.serverless.start({'handler': handler})
+if __name__ == '__main__':
+    runpod.serverless.start({'handler': handler})

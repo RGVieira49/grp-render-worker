@@ -14,13 +14,9 @@ TEXTURAS = cfg.get('texturas_dir', '/opt/texturas')
 
 # ---------------------------------------------------------------- 1. limpeza
 malhas = [o for o in sc.objects if o.type == 'MESH']
-xs = sorted((o.matrix_world @ Vector(o.bound_box[0])).x for o in malhas)
-ys = sorted((o.matrix_world @ Vector(o.bound_box[0])).y for o in malhas)
-mx_, my_ = xs[len(xs) // 2], ys[len(ys) // 2]
-for o in malhas:  # peças soltas longe do apartamento
-    c = o.matrix_world @ (sum((Vector(v) for v in o.bound_box), Vector()) / 8)
-    if abs(c.x - mx_) > 15 or abs(c.y - my_) > 15:
-        o.hide_render = True
+from limpeza import pecas_soltas  # noqa: E402 (mesmo critério da versão leve)
+for o in pecas_soltas(malhas)[0]:  # peças soltas longe do modelo
+    o.hide_render = True
 
 # Peças espelhadas no SketchUp chegam com as normais personalizadas invertidas (o render vê o avesso
 # e pinta de preto). Sem a normal personalizada, o Blender recalcula a frente certa pela geometria.

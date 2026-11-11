@@ -8,6 +8,7 @@ import bpy, sys, json, os, tempfile, time
 from mathutils import Vector
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from regras_materiais import classe_pelo_nome  # noqa: E402
+from limpeza import pecas_soltas  # noqa: E402
 
 args = sys.argv[sys.argv.index('--') + 1:]
 saida = args[0]
@@ -16,14 +17,11 @@ t0 = time.time()
 sc = bpy.context.scene
 
 malhas = [o for o in sc.objects if o.type == 'MESH']
-xs = sorted((o.matrix_world @ Vector(o.bound_box[0])).x for o in malhas)
-ys = sorted((o.matrix_world @ Vector(o.bound_box[0])).y for o in malhas)
-mx_, my_ = xs[len(xs) // 2], ys[len(ys) // 2]
+soltas, raio_limpeza = pecas_soltas(malhas)
+soltas = set(soltas)
 fora = 0
 for o in malhas:
-    c = o.matrix_world @ (sum((Vector(v) for v in o.bound_box), Vector()) / 8)
-    tira = abs(c.x - mx_) > 15 or abs(c.y - my_) > 15
-    tira = tira or any(s.material and 'light beam' in s.material.name.lower() for s in o.material_slots)
+    tira = o in soltas or any(s.material and 'light beam' in s.material.name.lower() for s in o.material_slots)
     if tira:
         bpy.data.objects.remove(o, do_unlink=True)
         fora += 1
@@ -173,6 +171,6 @@ def consertar_glb(caminho):
 
 
 referencias_soltas = consertar_glb(saida)
-print('PREVIA', json.dumps({'referencias_soltas': referencias_soltas, 'objetos': len(malhas), 'removidos': fora, 'simplificadas': simplificadas,
+print('PREVIA', json.dumps({'raio_limpeza_m': round(raio_limpeza, 1), 'referencias_soltas': referencias_soltas, 'objetos': len(malhas), 'removidos': fora, 'simplificadas': simplificadas,
                             'texturas_descartadas': sem_textura, 'materiais': len(ficha),
                             'segundos': round(time.time() - t0, 1)}))

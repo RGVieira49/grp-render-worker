@@ -29,6 +29,26 @@ for o in malhas:
         o.data.attributes.remove(o.data.attributes['custom_normal'])
         espelhadas += 1
 
+# Suavização por ângulo (como o V-Ray/Enscape fazem com modelo do SketchUp): superfícies curvas de poucos
+# polígonos (luminária, travesseiro, almofada) ficam lisas; quinas acima de 40° continuam vivas.
+suavizadas = 0
+if cfg.get('suavizar', True):
+    angulo = math.radians(cfg.get('suavizar_angulo', 40))
+    vistos = set()
+    for o in malhas:
+        me = o.data
+        if me.name in vistos or o.hide_render:
+            continue
+        vistos.add(me.name)
+        if 'custom_normal' in me.attributes:
+            me.attributes.remove(me.attributes['custom_normal'])
+        try:
+            me.shade_smooth()
+            me.set_sharp_from_angle(angle=angulo)
+            suavizadas += 1
+        except (AttributeError, RuntimeError, TypeError):
+            pass
+
 # ---------------------------------------------------------------- 2. materiais por classe
 # O SketchUp exporta tudo com rugosidade 0,5, sem metal e com texturas de 300–600 px. Cada material
 # ganha uma classe (pelo nome, ou pela lista "materiais" da cena, que vence) e a classe diz o acabamento.
@@ -61,7 +81,7 @@ ACABAMENTO = {
     'couro': dict(rug=0.45), 'cimento_queimado': dict(rug=0.55), 'pedra': dict(rug=0.14),
     'ceramica': dict(rug=0.2, relevo=0.05), 'textura_parede': dict(rug=0.85, relevo=0.06),
     'laca': dict(rug=0.22), 'plastico': dict(rug=0.3), 'planta': dict(rug=0.5, translucencia=0.25),
-    'pintura': dict(rug=0.85), 'outro': dict(rug=0.6),
+    'pintura': dict(rug=0.85), 'outro': dict(rug=0.6), 'luz_pintada': dict(rug=0.8),
 }
 # Texturas físicas CC0 (Poly Haven) e o tamanho real de uma repetição, em metros.
 # "trocar": a cor vem da textura fina (casada com a cor média do original);
@@ -170,6 +190,7 @@ def vidro_passa_luz(m):
 
 
 contagem, trocadas = {}, []
+luzes_pintadas = set()
 for m in bpy.data.materials:
     if not m.use_nodes:
         continue
@@ -191,6 +212,14 @@ for m in bpy.data.materials:
         if not pr.inputs['Base Color'].is_linked:
             pr.inputs['Base Color'].default_value = (0.97, 0.98, 0.98, 1)
         vidro_passa_luz(m)
+        continue
+    if cl == 'luz_pintada':
+        # Placa com o brilho de uma fita de LED desenhado em degradê (truque do SketchUp): a placa some
+        # e, mais abaixo (seção 3), uma luz linear de verdade entra na borda de cima dela.
+        saida_m = next((n for n in nt.nodes if n.type == 'OUTPUT_MATERIAL' and n.is_active_output), None)
+        if saida_m:
+            nt.links.new(nt.nodes.new('ShaderNodeBsdfTransparent').outputs['BSDF'], saida_m.inputs['Surface'])
+        luzes_pintadas.add(m.name)
         continue
     if cl == 'espelho' and not pr.inputs['Base Color'].is_linked:
         pr.inputs['Base Color'].default_value = (0.9, 0.9, 0.9, 1)
@@ -436,6 +465,27 @@ if cfg.get('acender_spots', True) and luz['spots'] > 0:
         l.data.spot_blend = 0.6
         l.data.shadow_soft_size = 0.03
         spots += 1
+# Fitas de LED: uma luz linear (retângulo fino) na borda de cima de cada placa de brilho pintado,
+# virada para baixo — como a fita escondida sob o armário ou atrás da cabeceira.
+fitas = 0
+for o in malhas:
+    if o.hide_render or not any(s and s.name in luzes_pintadas for s in o.data.materials):
+        continue
+    cantos = [o.matrix_world @ Vector(v) for v in o.bound_box]
+    x0, x1 = min(v.x for v in cantos), max(v.x for v in cantos)
+    y0, y1 = min(v.y for v in cantos), max(v.y for v in cantos)
+    comprimento = max(x1 - x0, y1 - y0)
+    if comprimento < 0.1:
+        continue
+    fita = bpy.data.objects.new('fita_led', bpy.data.lights.new('fita_led', 'AREA'))
+    sc.collection.objects.link(fita)
+    fita.data.shape = 'RECTANGLE'
+    fita.data.size, fita.data.size_y = (comprimento, 0.03) if (x1 - x0) >= (y1 - y0) else (0.03, comprimento)
+    fita.data.energy = cfg.get('led_w_por_metro', 8.0) * comprimento
+    fita.data.color = (1.0, 0.8, 0.55)  # ~3000 K
+    fita.location = ((x0 + x1) / 2, (y0 + y1) / 2, max(v.z for v in cantos) - 0.01)
+    fita.visible_camera = False
+    fitas += 1
 for o in malhas:  # feixes de luz falsos (geometria) não entram no render físico
     if any(s and re.search(r'light beam', s.name, re.I) for s in o.data.materials):
         o.hide_render = True
@@ -650,7 +700,7 @@ sc.render.filepath = cfg['saida']
 
 t1 = time.time()
 bpy.ops.render.render(write_still=True)
-print('RESUMO', json.dumps({'materiais': contagem, 'texturas_trocadas': trocadas, 'espelhadas': espelhadas,
+print('RESUMO', json.dumps({'materiais': contagem, 'suavizadas': suavizadas, 'fitas_led': fitas, 'texturas_trocadas': trocadas, 'espelhadas': espelhadas,
                             'pisos_polidos': pisos_polidos, 'spots': spots, 'piso_z': round(z0, 3),
                             'cor': sc.view_settings.view_transform, 'exposicao': round(expo, 2),
                             'balanco': [round(g, 3) for g in ganhos], 'fotometro': medida, 'luz': cfg.get('luz', 'dia'),

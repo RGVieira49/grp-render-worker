@@ -2,7 +2,7 @@
 # A cena.json traz câmera, luz, resolução e amostras. O mesmo script roda no Mac (Metal) e na GPU alugada (OptiX).
 # v4: texturas finas (CC0) no lugar das texturas pequenas do SketchUp, vidro que deixa a luz passar,
 #     exposição e balanço de branco medidos numa prévia (como o fotômetro da câmera), presets de luz e 4K.
-import bpy, sys, os, json, math, re, time, tempfile
+import bpy, bmesh, sys, os, json, math, re, time, tempfile
 import numpy as np
 from mathutils import Vector
 
@@ -42,6 +42,13 @@ if cfg.get('suavizar', True):
         vistos.add(me.name)
         if 'custom_normal' in me.attributes:
             me.attributes.remove(me.attributes['custom_normal'])
+        # o glTF do SketchUp chega com cada face de vértices soltos (sem aresta comum, nada suaviza):
+        # solda os vértices que coincidem antes; quinas vivas continuam vivas pelo ângulo
+        bm = bmesh.new()
+        bm.from_mesh(me)
+        bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.0002)
+        bm.to_mesh(me)
+        bm.free()
         try:
             me.shade_smooth()
             me.set_sharp_from_angle(angle=angulo)

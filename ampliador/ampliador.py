@@ -30,6 +30,7 @@ from PIL import Image
 from diffusers import (AutoencoderKL, ControlNetModel, DPMSolverMultistepScheduler,
                        StableDiffusionXLControlNetImg2ImgPipeline)
 import runpod
+from huggingface_hub import snapshot_download
 
 BASE = ('SG161222/RealVisXL_V5.0', 'ac93e0dda1f6d448cae19bbfab8c5e720a5e48bc')
 TILE = ('xinsir/controlnet-tile-sdxl-1.0', '1ae8d9529efe58f7362a987363ff86a7904dc84f')
@@ -49,8 +50,13 @@ t_carga = time.time()
 dtype = torch.float16
 vae = AutoencoderKL.from_pretrained(VAE[0], revision=VAE[1], torch_dtype=dtype)
 controlnet = ControlNetModel.from_pretrained(TILE[0], revision=TILE[1], torch_dtype=dtype)
+# só os pesos fp16 (o repositório também traz a rede principal em fp32, ~10 GB que não usamos)
+pasta_base = snapshot_download(BASE[0], revision=BASE[1], allow_patterns=[
+    'model_index.json', 'scheduler/*', 'tokenizer/*', 'tokenizer_2/*', '*/config.json',
+    'text_encoder/model.fp16.safetensors', 'text_encoder_2/model.fp16.safetensors',
+    'unet/diffusion_pytorch_model.fp16.safetensors'])
 pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
-    BASE[0], revision=BASE[1], vae=vae, controlnet=controlnet, torch_dtype=dtype, variant='fp16')
+    pasta_base, vae=vae, controlnet=controlnet, torch_dtype=dtype, variant='fp16')
 pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config, use_karras_sigmas=True)
 pipe.to('cuda')
 pipe.set_progress_bar_config(disable=True)
@@ -75,7 +81,8 @@ def rampa(n, antes, depois):
 
 
 def baixar(url):
-    with urllib.request.urlopen(url, timeout=300) as r:
+    req = urllib.request.Request(url, headers={'User-Agent': 'grp-ampliador/1.0'})
+    with urllib.request.urlopen(req, timeout=300) as r:
         return r.read()
 
 

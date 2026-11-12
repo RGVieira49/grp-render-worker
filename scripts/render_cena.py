@@ -67,7 +67,13 @@ ACABAMENTO = {
     'ceramica': dict(rug=0.2, relevo=0.05), 'textura_parede': dict(rug=0.85, relevo=0.06),
     'laca': dict(rug=0.22), 'plastico': dict(rug=0.3), 'planta': dict(rug=0.5, translucencia=0.25),
     'pintura': dict(rug=0.85), 'outro': dict(rug=0.6), 'luz_pintada': dict(rug=0.8),
+    # áreas externas: calçada/porcelanato externo (o relevo vem do rejunte da própria textura), asfalto, grama
+    'piso_externo': dict(rug=0.8, relevo=0.04), 'asfalto': dict(rug=0.9), 'grama': dict(rug=0.95),
 }
+# Tinta branca de verdade reflete uns 80–85% da luz; o #FFFFFF do SketchUp (99%) deixava a fachada leitosa:
+# a luz rebatida entre paredes "brancas demais" clareava as sombras. O tom não muda, só o teto físico.
+ALBEDO_MAX = cfg.get('albedo_max', 0.85)
+SEM_TETO = ('vidro', 'agua', 'espelho', 'metal', 'luz_pintada')
 # Texturas físicas CC0 (Poly Haven) e o tamanho real de uma repetição, em metros.
 # "trocar": a cor vem da textura fina (casada com a cor média do original);
 # senão a cor do arquiteto fica e a textura fina entra só no relevo e no brilho.
@@ -192,8 +198,26 @@ def _hex(cor):
     return tuple(v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4 for v in srgb)
 
 
+def cor_do_projeto(pr, tex, aj):
+    """Cor (linear) que o arquiteto deu ao material: a da textura dele, a cor lisa, ou a informada no ajuste."""
+    if aj.get('cor_projeto') and _hex(aj['cor_projeto']):
+        c = np.array(_hex(aj['cor_projeto']), np.float32)
+    elif tex is not None:
+        c = np.array(media_linear(tex.image), np.float32)
+    elif not pr.inputs['Base Color'].is_linked:
+        c = np.array(pr.inputs['Base Color'].default_value[:3], np.float32)
+    else:
+        c = np.full(3, 0.6, np.float32)
+    return c * min(1.0, ALBEDO_MAX / max(float(c.max()), 1e-4))  # branco continua branco, com reflexão real
+
+
 def aplicar_biblioteca(m, nt, pr, tex, aj, lib):
-    """Material da biblioteca (Poly Haven / ambientCG, 2K) no lugar do material do SketchUp."""
+    """Material da biblioteca (Poly Haven / ambientCG, 2K) no lugar do material do SketchUp.
+    modo "projeto": da biblioteca vêm só o relevo, a rugosidade e a variação fina da superfície; a cor média
+    continua exatamente a do arquiteto (asfalto continua o cinza dele, a grama o verde dele). "variacao" (0–1)
+    diz quanto da mancha natural da textura aparece sobre a cor lisa."""
+    modo = aj.get('modo', 'biblioteca')
+    alvo_projeto = cor_do_projeto(pr, tex, aj) if modo == 'projeto' else None
     escala = max(0.05, float(aj.get('escala', 1.0)))
     orig_m = metros_por_repeticao(m)
     if orig_m:  # o mapeamento que o arquiteto deu (direção do veio) com o tamanho real da textura
@@ -219,7 +243,25 @@ def aplicar_biblioteca(m, nt, pr, tex, aj, lib):
     cor_t = tex_lib('cor', True)
     saida_cor = cor_t.outputs['Color']
     tinta = _hex(aj['cor']) if aj.get('cor') else None
-    if tinta and tinta != (1.0, 1.0, 1.0):
+    if alvo_projeto is not None:
+        razao = np.clip(alvo_projeto / np.maximum(media_linear(cor_t.image), 1e-4), 0.05, 12.0)
+        mult = nt.nodes.new('ShaderNodeMix')
+        mult.data_type = 'RGBA'
+        mult.blend_type = 'MULTIPLY'
+        mult.clamp_result = True
+        mult.inputs['Factor'].default_value = 1.0
+        nt.links.new(saida_cor, mult.inputs[6])
+        mult.inputs[7].default_value = (*[float(x) for x in razao], 1)
+        saida_cor = mult.outputs[2]
+        var = min(1.0, max(0.0, float(aj.get('variacao', 1.0))))
+        if var < 1.0:
+            mix = nt.nodes.new('ShaderNodeMix')
+            mix.data_type = 'RGBA'
+            mix.inputs['Factor'].default_value = var
+            mix.inputs[6].default_value = (*[float(x) for x in alvo_projeto], 1)
+            nt.links.new(saida_cor, mix.inputs[7])
+            saida_cor = mix.outputs[2]
+    elif tinta and tinta != (1.0, 1.0, 1.0):
         mult = nt.nodes.new('ShaderNodeMix')
         mult.data_type = 'RGBA'
         mult.blend_type = 'MULTIPLY'
@@ -306,6 +348,12 @@ for m in bpy.data.materials:
     if not pr.inputs['Roughness'].is_linked:
         pr.inputs['Roughness'].default_value = p['rug']
     pr.inputs['Metallic'].default_value = 1.0 if cl in ('metal', 'espelho') else 0.0
+    if cl not in SEM_TETO and not pr.inputs['Base Color'].is_linked:
+        bc = pr.inputs['Base Color'].default_value
+        mx = max(bc[0], bc[1], bc[2])
+        if mx > ALBEDO_MAX:
+            k = ALBEDO_MAX / mx
+            pr.inputs['Base Color'].default_value = (bc[0] * k, bc[1] * k, bc[2] * k, bc[3])
     if cl == 'vidro':
         pr.inputs['Transmission Weight'].default_value = 1.0
         pr.inputs['IOR'].default_value = 1.5
@@ -498,6 +546,67 @@ for m in bpy.data.materials:
     nt.links.new(coord.outputs['Object'], ruido.inputs['Vector'])
     nt.links.new(ruido.outputs['Fac'], faixa.inputs['Value'])
     nt.links.new(faixa.outputs['Result'], pr.inputs['Roughness'])
+
+# 2c. Água: o SketchUp quase nunca traz a face da água (a piscina chega vazia, só o revestimento). Com
+# "agua": <cota> no ajuste do material do revestimento, as faces de fundo dele (fundo, prainha, degraus) são
+# copiadas na cota da água: a lâmina cobre exatamente a bacia que o arquiteto desenhou, sem invadir o deck.
+aguas = []
+for nome_rev, aj_rev in AJUSTES.items():
+    if aj_rev.get('agua') is None or nome_rev not in bpy.data.materials:
+        continue
+    rev, nivel = bpy.data.materials[nome_rev], float(aj_rev['agua'])
+    bm = bmesh.new()
+    for o in malhas:
+        if o.hide_render or not any(s.material == rev for s in o.material_slots):
+            continue
+        idx = {i for i, s in enumerate(o.material_slots) if s.material == rev}
+        mw = o.matrix_world
+        n3 = mw.to_3x3().inverted_safe().transposed()
+        for pg in o.data.polygons:
+            if pg.material_index not in idx or (n3 @ pg.normal).normalized().z < 0.9:
+                continue
+            pts = [mw @ o.data.vertices[v].co for v in pg.vertices]
+            if max(p.z for p in pts) >= nivel:
+                continue
+            vs = [bm.verts.new((p.x, p.y, nivel)) for p in pts]
+            try:
+                bm.faces.new(vs)
+            except ValueError:
+                pass
+    if not bm.faces:
+        bm.free()
+        continue
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.002)
+    for f in bm.faces:
+        if f.normal.z < 0:
+            f.normal_flip()
+    me = bpy.data.meshes.new(f'agua_{nome_rev}')
+    bm.to_mesh(me)
+    bm.free()
+    ob = bpy.data.objects.new(f'agua_{nome_rev}', me)
+    sc.collection.objects.link(ob)
+    ma = bpy.data.materials.new(f'agua_{nome_rev}')
+    ma.use_nodes = True
+    nt = ma.node_tree
+    pr = next(n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED')
+    pr.inputs['Transmission Weight'].default_value = 1.0
+    pr.inputs['IOR'].default_value = 1.333
+    pr.inputs['Roughness'].default_value = 0.02
+    pr.inputs['Base Color'].default_value = (0.78, 0.93, 0.93, 1)  # um verde-água leve: o azul é do revestimento
+    # marola fina: quebra o espelho perfeito como na foto de piscina (sem isso parece vidro)
+    coord = nt.nodes.new('ShaderNodeTexCoord')
+    ruido = nt.nodes.new('ShaderNodeTexNoise')
+    ruido.inputs['Scale'].default_value = cfg.get('agua_marola_escala', 1.2)
+    ruido.inputs['Detail'].default_value = 4
+    relevo = nt.nodes.new('ShaderNodeBump')
+    relevo.inputs['Strength'].default_value = cfg.get('agua_marola', 0.12)
+    relevo.inputs['Distance'].default_value = 0.02
+    nt.links.new(coord.outputs['Object'], ruido.inputs['Vector'])
+    nt.links.new(ruido.outputs['Fac'], relevo.inputs['Height'])
+    nt.links.new(relevo.outputs['Normal'], pr.inputs['Normal'])
+    vidro_passa_luz(ma)  # o sol chega ao fundo: a pastilha aparece clara e colorida sob a água
+    me.materials.append(ma)
+    aguas.append({'revestimento': nome_rev, 'cota': nivel, 'm2': round(sum(f.area for f in me.polygons), 1)})
 
 # Ajustes do painel de materiais (cor, brilho, relevo) por último: valem sobre tudo o que veio antes.
 for m in bpy.data.materials:
@@ -944,7 +1053,7 @@ print('RESUMO', json.dumps({'materiais': contagem, 'suavizadas': suavizadas, 'fi
                             'pisos_polidos': pisos_polidos, 'pisos_foscos': pisos_foscos, 'spots': spots, 'piso_z': round(z0, 3),
                             'cor': sc.view_settings.view_transform, 'exposicao': round(expo, 2),
                             'balanco': [round(g, 3) for g in ganhos], 'fotometro': medida, 'luz': cfg.get('luz', 'dia'),
-                            'externo': EXTERNO, 'alto': ALTO, 'ceu_visto': round(CEU_VISTO, 2), 'sol_azimute': round(luz['azimute'], 1),
+                            'externo': EXTERNO, 'aguas': aguas, 'alto': ALTO, 'ceu_visto': round(CEU_VISTO, 2), 'sol_azimute': round(luz['azimute'], 1),
                             'ceu_forca': ceu_forca and round(ceu_forca, 3),
                             'device': cy.device + ':' + prefs.compute_device_type,
                             'preparo_s': round(t1 - t0, 1), 'render_s': round(time.time() - t1, 1)}))

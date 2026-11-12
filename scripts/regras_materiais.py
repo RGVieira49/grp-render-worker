@@ -4,6 +4,9 @@ import re
 
 CLASSES = [
     (r'[áa]gua\b|\bwater\b', 'agua'),
+    (r'asfalto|asphalt', 'asfalto'),
+    (r'grama\b|gramado|\bgrass|\blawn', 'grama'),
+    (r'cal[çc]ada|piso.?extern|intertravad|paving|pavement|sidewalk', 'piso_externo'),
     (r'vidro|glass|translucent|cristal', 'vidro'),
     (r'espelho|mirror', 'espelho'),
     (r'a[çc]o\b|inox|cromad|chrome|metal|alum[ií]n|steel|lat[ãa]o|dourad|gold|bronze|cobre|niquel', 'metal'),

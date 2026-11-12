@@ -772,8 +772,10 @@ for nome_rev, aj_rev in AJUSTES.items():
 # - canto e encontro de planos juntam poeira e recebem menos luz: a oclusão local escurece um pouco a cor ali.
 QUINAS = cfg.get('quinas', 0.006 if EXTERNO else 0.0)  # testado no Mac 12/11: frisos com fio de luz, +15–70% de tempo
 SUJEIRA = cfg.get('sujeira', 0.22 if EXTERNO else 0.0)
+MACRO = cfg.get('variacao_tom', 0.04 if EXTERNO else 0.0)
+JANELAS = cfg.get('janelas_vivas', 1.0 if EXTERNO else 0.0)
 quinas_aplicadas = 0
-if QUINAS > 0 or SUJEIRA > 0:
+if QUINAS > 0 or SUJEIRA > 0 or MACRO > 0 or JANELAS > 0:
     for m in bpy.data.materials:
         if not m.use_nodes or classe_de(m.name) not in SOLIDOS + ('metal', 'outro'):
             continue
@@ -810,6 +812,60 @@ if QUINAS > 0 or SUJEIRA > 0:
                 nt.links.new(fx.outputs['Result'], cmb.inputs[i])
             nt.links.new(cmb.outputs['Color'], mul.inputs[7])
             nt.links.new(mul.outputs[2], pr.inputs['Base Color'])
+        cl_m = classe_de(m.name)
+        if MACRO > 0 and cl_m in ('pintura', 'textura_parede') and pr.inputs['Base Color'].is_linked:
+            # parede real nunca tem cor perfeitamente uniforme: manchas largas (~12 m) de ±4% no tom
+            geo = nt.nodes.new('ShaderNodeNewGeometry')
+            nz = nt.nodes.new('ShaderNodeTexNoise')
+            nz.inputs['Scale'].default_value = 0.08
+            nz.inputs['Detail'].default_value = 3
+            nt.links.new(geo.outputs['Position'], nz.inputs['Vector'])
+            fx2 = nt.nodes.new('ShaderNodeMapRange')
+            fx2.inputs['To Min'].default_value, fx2.inputs['To Max'].default_value = 1.0 - MACRO, 1.0 + MACRO * 0.5
+            nt.links.new(nz.outputs['Fac'], fx2.inputs['Value'])
+            cm2 = nt.nodes.new('ShaderNodeCombineColor')
+            for i in range(3):
+                nt.links.new(fx2.outputs['Result'], cm2.inputs[i])
+            mm = nt.nodes.new('ShaderNodeMix')
+            mm.data_type = 'RGBA'; mm.blend_type = 'MULTIPLY'; mm.inputs['Factor'].default_value = 1.0
+            nt.links.new(pr.inputs['Base Color'].links[0].from_socket, mm.inputs[6])
+            nt.links.new(cm2.outputs['Color'], mm.inputs[7])
+            nt.links.new(mm.outputs[2], pr.inputs['Base Color'])
+        if JANELAS > 0:
+            # Janela viva: o anteprojeto tem a torre oca; pela abertura a câmera via preto chapado. Onde o ponto
+            # está "fechado" (oclusão a 2,5 m quase total = dentro do apartamento) e é visto pela câmera, entra
+            # a penumbra de um interior; ~1 em 5 janelas com luz quente acesa (célula de ~2 m por janela).
+            saida_m = next((n for n in nt.nodes if n.type == 'OUTPUT_MATERIAL' and n.is_active_output), None)
+            if saida_m and saida_m.inputs['Surface'].is_linked:
+                ao2 = nt.nodes.new('ShaderNodeAmbientOcclusion')
+                ao2.samples = 8
+                ao2.only_local = False
+                ao2.inputs['Distance'].default_value = 2.5
+                fechado = nt.nodes.new('ShaderNodeMapRange')
+                fechado.inputs['From Min'].default_value, fechado.inputs['From Max'].default_value = 0.35, 0.05
+                nt.links.new(ao2.outputs['AO'], fechado.inputs['Value'])
+                lp = nt.nodes.new('ShaderNodeLightPath')
+                so_cam = nt.nodes.new('ShaderNodeMath'); so_cam.operation = 'MULTIPLY'
+                nt.links.new(fechado.outputs['Result'], so_cam.inputs[0]); nt.links.new(lp.outputs['Is Camera Ray'], so_cam.inputs[1])
+                geo2 = nt.nodes.new('ShaderNodeNewGeometry')
+                vor2 = nt.nodes.new('ShaderNodeTexVoronoi')
+                vor2.inputs['Scale'].default_value = 0.5
+                nt.links.new(geo2.outputs['Position'], vor2.inputs['Vector'])
+                sep2 = nt.nodes.new('ShaderNodeSeparateColor')
+                nt.links.new(vor2.outputs['Color'], sep2.inputs['Color'])
+                acesa = nt.nodes.new('ShaderNodeMath'); acesa.operation = 'GREATER_THAN'
+                nt.links.new(sep2.outputs[0], acesa.inputs[0]); acesa.inputs[1].default_value = 1.0 - cfg.get('janelas_acesas', 0.2)
+                cor_j = nt.nodes.new('ShaderNodeMix'); cor_j.data_type = 'RGBA'
+                nt.links.new(acesa.outputs[0], cor_j.inputs['Factor'])
+                cor_j.inputs[6].default_value = (0.07 * JANELAS, 0.065 * JANELAS, 0.06 * JANELAS, 1)  # penumbra
+                cor_j.inputs[7].default_value = (0.55 * JANELAS, 0.36 * JANELAS, 0.2 * JANELAS, 1)    # luz quente acesa
+                em = nt.nodes.new('ShaderNodeEmission')
+                nt.links.new(cor_j.outputs[2], em.inputs['Color'])
+                nt.links.new(so_cam.outputs[0], em.inputs['Strength'])
+                soma_s = nt.nodes.new('ShaderNodeAddShader')
+                nt.links.new(saida_m.inputs['Surface'].links[0].from_socket, soma_s.inputs[0])
+                nt.links.new(em.outputs['Emission'], soma_s.inputs[1])
+                nt.links.new(soma_s.outputs['Shader'], saida_m.inputs['Surface'])
         quinas_aplicadas += 1
 
 # Ajustes do painel de materiais (cor, brilho, relevo) por último: valem sobre tudo o que veio antes.
@@ -867,15 +923,103 @@ if EXTERNO and cotas and cfg.get('entorno', ALTO):
     _ma = bpy.data.materials.new('entorno'); _ma.use_nodes = True
     _nt = _ma.node_tree; _pp = next(n for n in _nt.nodes if n.type == 'BSDF_PRINCIPLED')
     _tc = _nt.nodes.new('ShaderNodeTexCoord'); _nz = _nt.nodes.new('ShaderNodeTexNoise')
-    _nz.inputs['Scale'].default_value = 0.02; _nz.inputs['Detail'].default_value = 8
+    _nz.inputs['Scale'].default_value = 0.035; _nz.inputs['Detail'].default_value = 12; _nz.inputs['Roughness'].default_value = 0.65
     _rp = _nt.nodes.new('ShaderNodeValToRGB')
-    _rp.color_ramp.elements[0].color = (0.10, 0.12, 0.07, 1)   # gramado
-    _rp.color_ramp.elements[1].color = (0.16, 0.15, 0.11, 1)   # terra/seco
+    _rp.color_ramp.elements[0].color = (0.09, 0.11, 0.065, 1)  # gramado
+    _rp.color_ramp.elements.new(0.45).color = (0.17, 0.165, 0.15, 1)  # calçamento/telhado claro de longe
+    _rp.color_ramp.elements[-1].color = (0.13, 0.11, 0.08, 1)  # terra
     _nt.links.new(_tc.outputs['Object'], _nz.inputs['Vector']); _nt.links.new(_nz.outputs['Fac'], _rp.inputs['Fac'])
     _nt.links.new(_rp.outputs['Color'], _pp.inputs['Base Color'])
     _pp.inputs['Roughness'].default_value = 0.95
     _me.materials.append(_ma)
     entorno = True
+
+# Bairro: a Chaos recomenda volumetria de vizinhança modelada em vez de foto de fundo. Casas, prédios baixos,
+# algumas torres e copas de árvore, a partir de 35 m do terreno, com sementes fixas (o mesmo bairro em toda
+# vista). De longe, com a névoa, vira cidade; o horizonte deixa de ser uma linha dura de chão liso.
+bairro = 0
+if entorno and cfg.get('bairro', True):
+    _xs, _ys = [], []
+    for o in malhas:
+        if o.hide_render:
+            continue
+        for v in o.bound_box:
+            w_ = o.matrix_world @ Vector(v); _xs.append(w_.x); _ys.append(w_.y)
+    bx0, bx1, by0, by1 = (float(np.percentile(_xs, 1)), float(np.percentile(_xs, 99)), float(np.percentile(_ys, 1)), float(np.percentile(_ys, 99)))
+    bcx, bcy, hx, hy = (bx0 + bx1) / 2, (by0 + by1) / 2, (bx1 - bx0) / 2, (by1 - by0) / 2
+    rng = np.random.default_rng(cfg.get('bairro_semente', 7))
+    from mathutils import Matrix
+    cores = [(0.62, 0.6, 0.56), (0.55, 0.5, 0.44), (0.7, 0.68, 0.64), (0.5, 0.47, 0.43), (0.45, 0.28, 0.2)]  # telhado cerâmico no fim
+    mats_b = []
+    for i, cc in enumerate(cores):
+        mb = bpy.data.materials.new(f'bairro_{i}'); mb.use_nodes = True
+        pb = next(n for n in mb.node_tree.nodes if n.type == 'BSDF_PRINCIPLED')
+        pb.inputs['Roughness'].default_value = 0.85
+        if i < 4:
+            ntb = mb.node_tree
+            gb = ntb.nodes.new('ShaderNodeNewGeometry'); sb = ntb.nodes.new('ShaderNodeSeparateXYZ')
+            ntb.links.new(gb.outputs['Position'], sb.inputs['Vector'])
+            ab = ntb.nodes.new('ShaderNodeMath'); ab.operation = 'ADD'
+            ntb.links.new(sb.outputs['X'], ab.inputs[0]); ntb.links.new(sb.outputs['Y'], ab.inputs[1])
+            cb = ntb.nodes.new('ShaderNodeCombineXYZ')
+            ntb.links.new(ab.outputs[0], cb.inputs['X']); ntb.links.new(sb.outputs['Z'], cb.inputs['Y'])
+            br = ntb.nodes.new('ShaderNodeTexBrick')
+            br.offset = 0.0; br.squash = 1.0
+            br.inputs['Scale'].default_value = 1.0
+            br.inputs['Brick Width'].default_value = 2.6; br.inputs['Row Height'].default_value = 3.0
+            br.inputs['Mortar Size'].default_value = 0.9
+            br.inputs['Color1'].default_value = (0.05, 0.06, 0.07, 1); br.inputs['Color2'].default_value = (0.08, 0.085, 0.09, 1)
+            br.inputs['Mortar'].default_value = (*cc, 1)
+            ntb.links.new(cb.outputs['Vector'], br.inputs['Vector'])
+            ntb.links.new(br.outputs['Color'], pb.inputs['Base Color'])
+        else:
+            pb.inputs['Base Color'].default_value = (*cc, 1)
+        mats_b.append(mb)
+    mt = bpy.data.materials.new('bairro_arvores'); mt.use_nodes = True
+    pt = next(n for n in mt.node_tree.nodes if n.type == 'BSDF_PRINCIPLED')
+    pt.inputs['Base Color'].default_value = (0.045, 0.07, 0.03, 1); pt.inputs['Roughness'].default_value = 0.9
+    mats_b.append(mt)
+    bmb = bmesh.new()
+    def _fora(px, py, margem):
+        return not (bx0 - margem < px < bx1 + margem and by0 - margem < py < by1 + margem)
+    for _ in range(cfg.get('bairro_lotes', 1600)):
+        ang = rng.uniform(0, 2 * math.pi); r = 35 + rng.gamma(1.4, 140)
+        px, py = bcx + (hx + r) * math.cos(ang), bcy + (hy + r) * math.sin(ang)
+        if not _fora(px, py, 30):
+            continue
+        t = rng.random()
+        if r < 90:
+            t = min(t, 0.59)  # perto do terreno só casas (prédio vizinho colado vira paredão sem graça)
+        elif r < 200:
+            t = min(t, 0.91)
+        if t < 0.6:
+            w_, d_, h_ = rng.uniform(8, 14), rng.uniform(10, 20), rng.uniform(3, 8)
+        elif t < 0.92:
+            w_, d_, h_ = rng.uniform(14, 26), rng.uniform(14, 26), rng.uniform(9, 26)
+        else:
+            w_, d_, h_ = rng.uniform(16, 28), rng.uniform(16, 28), rng.uniform(30, 75)
+        M = Matrix.Translation((px, py, _zmin + h_ / 2)) @ Matrix.Rotation(rng.uniform(-0.08, 0.08), 4, 'Z') @ Matrix.Diagonal((w_, d_, h_, 1))
+        res = bmesh.ops.create_cube(bmb, size=1.0, matrix=M)
+        mi = 4 if (t < 0.6 and rng.random() < 0.5) else int(rng.integers(0, 4))
+        for f in {f for v in res['verts'] for f in v.link_faces}:
+            f.material_index = mi
+        bairro += 1
+    for _ in range(cfg.get('bairro_arvores', 1400)):
+        ang = rng.uniform(0, 2 * math.pi); r = 25 + rng.gamma(1.3, 120)
+        px, py = bcx + (hx + r) * math.cos(ang), bcy + (hy + r) * math.sin(ang)
+        if not _fora(px, py, 10):
+            continue
+        rr = rng.uniform(3.0, 6.5)
+        # copa achatada e irregular sobre um tronco de ~2 m (bola perfeita no chão denunciava maquete)
+        res = bmesh.ops.create_icosphere(bmb, subdivisions=3, radius=rr, matrix=Matrix.Translation((px, py, _zmin + 2.2 + rr * 0.75)) @ Matrix.Rotation(rng.uniform(0, 6.3), 4, 'Z') @ Matrix.Diagonal((rng.uniform(0.85, 1.25), rng.uniform(0.85, 1.25), rng.uniform(0.55, 0.8), 1)))
+        for v_ in res['verts']:
+            v_.co += v_.normal * float(rng.normal(0, rr * 0.07))
+        for f in {f for v in res['verts'] for f in v.link_faces}:
+            f.material_index = 5
+    meb = bpy.data.meshes.new('bairro'); bmb.to_mesh(meb); bmb.free()
+    for mb in mats_b:
+        meb.materials.append(mb)
+    sc.collection.objects.link(bpy.data.objects.new('bairro', meb))
 if ALTO and cfg.get('ceu_foto_alto'):
     cfg['ceu_foto'] = cfg['ceu_foto_alto']
 w = bpy.data.worlds.new('ceu') if not sc.world else sc.world
@@ -1254,11 +1398,11 @@ if ganhos != (1.0, 1.0, 1.0):
     ultimo = wb.outputs[2]
 # Perspectiva aérea: o que está longe ganha o véu da cor do horizonte (a foto real tem ar entre a câmera e o
 # prédio do fundo). Sem isso tudo fica nítido e saturado igual, perto e longe — cara de maquete.
-nevoa = cfg.get('neblina', 0.22 if EXTERNO else 0.0)
+nevoa = cfg.get('neblina', (0.45 if ALTO else 0.22) if EXTERNO else 0.0)
 if nevoa > 0 and nevoa_cor is not None:
     sc.view_layers[0].use_pass_mist = True
     w.mist_settings.start = cfg.get('neblina_inicio', 30.0)
-    w.mist_settings.depth = cfg.get('neblina_fim', 900.0)
+    w.mist_settings.depth = cfg.get('neblina_fim', 700.0 if ALTO else 900.0)
     w.mist_settings.falloff = 'LINEAR'
     def _math(op):
         try:
@@ -1335,7 +1479,7 @@ print('RESUMO', json.dumps({'materiais': contagem, 'suavizadas': suavizadas, 'fi
                             'pisos_polidos': pisos_polidos, 'pisos_foscos': pisos_foscos, 'spots': spots, 'piso_z': round(z0, 3),
                             'cor': sc.view_settings.view_transform, 'exposicao': round(expo, 2),
                             'balanco': [round(g, 3) for g in ganhos], 'fotometro': medida, 'luz': cfg.get('luz', 'dia'),
-                            'externo': EXTERNO, 'entorno': entorno, 'quinas': quinas_aplicadas, 'look': sc.view_settings.look, 'transformacao': sc.view_settings.view_transform, 'aguas': aguas, 'folhas': folhas, 'duplicadas': duplicadas, 'alfas_removidos': alfas_removidos, 'recuadas': recuadas, 'faces_duplas': faces_duplas, 'vidros_externos': vidros_externos, 'neblina': nevoa if nevoa_cor is not None else 0, 'alto': ALTO, 'ceu_visto': round(CEU_VISTO, 2), 'sol_azimute': round(luz['azimute'], 1),
+                            'externo': EXTERNO, 'entorno': entorno, 'bairro': bairro, 'quinas': quinas_aplicadas, 'look': sc.view_settings.look, 'transformacao': sc.view_settings.view_transform, 'aguas': aguas, 'folhas': folhas, 'duplicadas': duplicadas, 'alfas_removidos': alfas_removidos, 'recuadas': recuadas, 'faces_duplas': faces_duplas, 'vidros_externos': vidros_externos, 'neblina': nevoa if nevoa_cor is not None else 0, 'alto': ALTO, 'ceu_visto': round(CEU_VISTO, 2), 'sol_azimute': round(luz['azimute'], 1),
                             'ceu_forca': ceu_forca and round(ceu_forca, 3),
                             'device': cy.device + ':' + prefs.compute_device_type,
                             'preparo_s': round(t1 - t0, 1), 'render_s': round(time.time() - t1, 1)}))

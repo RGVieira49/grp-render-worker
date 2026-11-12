@@ -482,8 +482,8 @@ for m in bpy.data.materials:
     if not pr.inputs['Roughness'].is_linked:
         pr.inputs['Roughness'].default_value = p['rug']
     pr.inputs['Metallic'].default_value = 1.0 if cl in ('metal', 'espelho') else 0.0
-    # Acabamento sólido não é transparente: o PNG do SketchUp às vezes traz canal alfa (a pastilha do letreiro do
-    # Kala), e o render mostrava o oco escuro atrás. Alfa só vale em folha, alambrado/grade (metal) e vidro.
+    # Acabamento sólido não é transparente: o PNG do SketchUp às vezes traz canal alfa (uma pastilha de letreiro, por exemplo)
+    # e o render mostrava o oco escuro atrás. Alfa só vale em folha, alambrado/grade (metal) e vidro.
     if cl in SOLIDOS and pr.inputs['Alpha'].is_linked:
         nt.links.remove(pr.inputs['Alpha'].links[0])
         pr.inputs['Alpha'].default_value = 1.0

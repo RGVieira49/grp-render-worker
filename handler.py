@@ -168,7 +168,10 @@ def handler(job):
     try:
         saida = os.path.join(pasta, f'render.{formato}')
         cena = dict(cena, saida=saida, formato=formato.upper().replace('JPG', 'JPEG'))
-        cena['ceu_foto'] = PAISAGENS.get(cena.pop('paisagem', 'jardim'), PAISAGENS['jardim'])
+        paisagem = cena.pop('paisagem', 'jardim')
+        cena['ceu_foto'] = PAISAGENS.get(paisagem, PAISAGENS['jardim'])
+        if paisagem == 'jardim':  # câmera no alto troca o jardim (foto do chão) pelo céu aberto
+            cena['ceu_foto_alto'] = PAISAGENS['ceu']
         cena['biblioteca'] = preparar_biblioteca(cena.get('biblioteca'))
         cena.pop('texturas_dir', None)  # caminhos locais só o próprio trabalhador decide
         arq = os.path.join(pasta, 'cena.json')

@@ -3,6 +3,7 @@
 import re
 
 CLASSES = [
+    (r'[áa]gua\b|\bwater\b', 'agua'),
     (r'vidro|glass|translucent|cristal', 'vidro'),
     (r'espelho|mirror', 'espelho'),
     (r'a[çc]o\b|inox|cromad|chrome|metal|alum[ií]n|steel|lat[ãa]o|dourad|gold|bronze|cobre|niquel', 'metal'),

@@ -59,7 +59,7 @@ if cfg.get('suavizar', True):
 from regras_materiais import CLASSES, classe_pelo_nome  # noqa: E402  (mesmas regras do visualizador)
 # rugosidade base e relevo (tirado da própria textura) de cada classe
 ACABAMENTO = {
-    'vidro': dict(rug=0.02), 'espelho': dict(rug=0.02), 'metal': dict(rug=0.38),
+    'vidro': dict(rug=0.02), 'espelho': dict(rug=0.02), 'metal': dict(rug=0.38), 'agua': dict(rug=0.03),
     'piso_madeira': dict(rug=0.38), 'madeira': dict(rug=0.42, verniz=0.12),
     'boucle': dict(rug=0.95, brilho_tecido=0.5), 'suede': dict(rug=0.8, brilho_tecido=0.7),
     'tapete': dict(rug=0.95, brilho_tecido=0.4), 'tecido': dict(rug=0.92, brilho_tecido=0.4),
@@ -313,6 +313,15 @@ for m in bpy.data.materials:
             pr.inputs['Base Color'].default_value = (0.97, 0.98, 0.98, 1)
         vidro_passa_luz(m)
         continue
+    if cl == 'agua':
+        # água de piscina/espelho d'água: transparente com reflexo (IOR 1,33) e um verde-azulado leve
+        pr.inputs['Transmission Weight'].default_value = 1.0
+        pr.inputs['IOR'].default_value = 1.333
+        if pr.inputs['Base Color'].is_linked:
+            nt.links.remove(pr.inputs['Base Color'].links[0])
+        pr.inputs['Base Color'].default_value = (0.72, 0.9, 0.9, 1)
+        vidro_passa_luz(m)
+        continue
     if cl == 'luz_pintada':
         # Placa com o brilho de uma fita de LED desenhado em degradê (truque do SketchUp): a placa some
         # e, mais abaixo (seção 3), uma luz linear de verdade entra na borda de cima dela.
@@ -518,12 +527,19 @@ if EXTERNO:
     luz['rebatedor'] = 0  # o painel do teto é truque de interior
     luz['spots'] = 0      # de dia, de fora, as luminárias apagadas não aparecem
     if 'ceu_forca' not in cfg and luz['forca'] > 0:
-        luz['ceu'] *= 0.2  # dia de sol: o sol manda (~4:1 sobre o céu); a calibração de interior deixava a fachada chapada e azul
+        luz['ceu'] *= 0.1  # dia de sol: o sol manda; com o céu de interior a sombra ficava clara e a fachada chapada
     if 'azimute' not in cfg.get('sol', {}):
         # sol de trás da câmera, 40° de lado: a fachada enquadrada fica iluminada e as varandas ganham sombra
         rumo = math.degrees(math.atan2(_c['alvo_x'] - _c['x'], _c['alvo_y'] - _c['y']))
-        luz['azimute'] = (rumo + 180 + cfg.get('sol_lado', 40)) % 360
+        # 65° de lado: luz rasante, como o fotógrafo de fachada escolhe (de frente, a 40°, as sombras das
+        # varandas caíam para trás e a fachada branca saía chapada)
+        luz['azimute'] = (rumo + 180 + cfg.get('sol_lado', 65)) % 360
 
+# Câmera no alto (varanda, cobertura, vista aérea): o fundo "jardim" foi fotografado do chão e mostrava um
+# gramado na altura do olho a 40 m; lá em cima vai o céu aberto, com horizonte.
+ALTO = bool(cotas) and _cz - z_chao > cfg.get('alto_m', 10)
+if ALTO and cfg.get('ceu_foto_alto'):
+    cfg['ceu_foto'] = cfg['ceu_foto_alto']
 w = bpy.data.worlds.new('ceu') if not sc.world else sc.world
 sc.world = w
 w.use_nodes = True
@@ -550,7 +566,27 @@ if cfg.get('ceu_foto'):
     wn.links.new(mapa.outputs['Vector'], env.inputs['Vector'])
     bg_foto = wn.nodes.new('ShaderNodeBackground')
     bg_foto.inputs['Strength'].default_value = cfg.get('ceu_foto_forca', 0.8) * max(luz['ceu'], 0.5)
-    wn.links.new(env.outputs['Color'], bg_foto.inputs['Color'])
+    cor_ceu = env.outputs['Color']
+    if ALTO:
+        # A foto de céu aberto tem embaixo do horizonte um reflexo do próprio céu (parece mar). Lá do alto,
+        # abaixo do horizonte vai uma névoa na cor do horizonte da foto, como a cidade vista de longe.
+        _px = np.empty(env.image.size[0] * env.image.size[1] * 4, np.float32)
+        env.image.pixels.foreach_get(_px)
+        _h = env.image.size[1]
+        _faixa = _px.reshape(_h, env.image.size[0], 4)[_h // 2 + 2:_h // 2 + max(4, _h // 40), ::8, :3].reshape(-1, 3)
+        _nevoa = np.clip(np.median(_faixa, axis=0) * 0.85, 0, 50)
+        sep = wn.nodes.new('ShaderNodeSeparateXYZ')
+        wn.links.new(mapa.outputs['Vector'], sep.inputs['Vector'])
+        faixa = wn.nodes.new('ShaderNodeMapRange')
+        faixa.inputs['From Min'].default_value, faixa.inputs['From Max'].default_value = -0.04, 0.0
+        wn.links.new(sep.outputs['Z'], faixa.inputs['Value'])
+        mix_h = wn.nodes.new('ShaderNodeMix')
+        mix_h.data_type = 'RGBA'
+        mix_h.inputs[6].default_value = (*[float(v) for v in _nevoa], 1)
+        wn.links.new(faixa.outputs['Result'], mix_h.inputs['Factor'])
+        wn.links.new(env.outputs['Color'], mix_h.inputs[7])
+        cor_ceu = mix_h.outputs[2]
+    wn.links.new(cor_ceu, bg_foto.inputs['Color'])
     caminho = wn.nodes.new('ShaderNodeLightPath')
     soma = wn.nodes.new('ShaderNodeMath')
     soma.operation = 'MAXIMUM'
@@ -723,7 +759,7 @@ cy.diffuse_bounces = 10
 cy.glossy_bounces = 8
 cy.transmission_bounces = 16
 cy.transparent_max_bounces = 16
-cy.sample_clamp_indirect = 10
+cy.sample_clamp_indirect = 3 if EXTERNO else 10  # fora, o céu forte nos reflexos virava manchas no chão
 cy.blur_glossy = 0.5
 # Khronos PBR Neutral mantém a cor que o arquiteto escolheu no material (o AgX lava os tons)
 # (a lista de opções desse campo é dinâmica: só se descobre se o nome vale tentando)
@@ -771,7 +807,14 @@ if expo is None or cfg.get('balanco_auto', 0.4) > 0:
     p97 = float(np.percentile(Y, 97))
     dentro = Y < p97  # janelas e lâmpadas fora da conta
     chave = float(np.exp(np.mean(np.log(Y[dentro] + 1e-4))))
-    if expo is None:
+    if expo is None and EXTERNO:
+        # fora, como o fotógrafo de fachada: expõe pelo branco no sol (os 5% mais claros do prédio ficam
+        # claros sem estourar) e a sombra escurece sozinha. Pelo meio-tom (regra de dentro) a fachada branca
+        # virava um cinza leitoso, sem preto nenhum.
+        p95 = float(np.percentile(Y, 95))
+        expo = math.log2(cfg.get('claro_alvo', 0.8) / max(p95, 1e-4))
+        expo = max(-6.0, min(6.0, expo)) + cfg.get('exposicao_ajuste', 0.0)
+    elif expo is None:
         # meio-tom do ambiente em ~0,32 (linear) sem passar 0,95 nos 3% mais claros
         expo = min(math.log2(cfg.get('chave_alvo', 0.32) / chave), math.log2(0.95 / max(p97, 1e-4)) + 0.6)
         expo = max(-4.0, min(6.0, expo)) + cfg.get('exposicao_ajuste', 0.0)
@@ -806,11 +849,11 @@ if EXTERNO and cfg.get('ceu_foto'):
     fp = fp.reshape(env.image.size[1], env.image.size[0], 4)[env.image.size[1] // 2:, ::4, :3].reshape(-1, 3)
     Yc = fp @ np.array([0.2126, 0.7152, 0.0722], np.float32)
     Yc = Yc[Yc < np.percentile(Yc, 99.5)]
-    ceu_forca = float(np.clip(cfg.get('ceu_alvo', 0.9) / max(float(Yc.mean()), 1e-4) / 2 ** expo, 0.05, 50))
+    ceu_forca = float(np.clip(cfg.get('ceu_alvo', 0.6) / max(float(Yc.mean()), 1e-4) / 2 ** expo, 0.05, 50))
     # só no que a câmera vê: nos reflexos o céu continua com a força de antes (senão a rua vira espelho de nuvem)
     bg_cam = wn.nodes.new('ShaderNodeBackground')
     bg_cam.inputs['Strength'].default_value = ceu_forca
-    wn.links.new(env.outputs['Color'], bg_cam.inputs['Color'])
+    wn.links.new(cor_ceu, bg_cam.inputs['Color'])
     mix_cam = wn.nodes.new('ShaderNodeMixShader')
     wn.links.new(caminho.outputs['Is Camera Ray'], mix_cam.inputs['Fac'])
     wn.links.new(mix.outputs['Shader'], mix_cam.inputs[1])
@@ -821,7 +864,7 @@ cy.adaptive_threshold = cfg.get('limiar_ruido', 0.01)
 sc.view_settings.exposure = expo
 sc.view_settings.use_curve_mapping = False
 
-pos = cfg.get('pos', {})
+pos = dict({'contraste': 0.24, 'saturacao': 1.12} if EXTERNO else {}, **cfg.get('pos', {}))  # fora: mais "punch", como foto de fachada
 if pos.get('contraste', 0.16) > 0:
     # curva em S suave, no espaço da tela (depois do mapeamento de cor): sombras mais fundas, altas preservadas
     k = pos.get('contraste', 0.16)
@@ -899,7 +942,7 @@ print('RESUMO', json.dumps({'materiais': contagem, 'suavizadas': suavizadas, 'fi
                             'pisos_polidos': pisos_polidos, 'pisos_foscos': pisos_foscos, 'spots': spots, 'piso_z': round(z0, 3),
                             'cor': sc.view_settings.view_transform, 'exposicao': round(expo, 2),
                             'balanco': [round(g, 3) for g in ganhos], 'fotometro': medida, 'luz': cfg.get('luz', 'dia'),
-                            'externo': EXTERNO, 'ceu_visto': round(CEU_VISTO, 2), 'sol_azimute': round(luz['azimute'], 1),
+                            'externo': EXTERNO, 'alto': ALTO, 'ceu_visto': round(CEU_VISTO, 2), 'sol_azimute': round(luz['azimute'], 1),
                             'ceu_forca': ceu_forca and round(ceu_forca, 3),
                             'device': cy.device + ':' + prefs.compute_device_type,
                             'preparo_s': round(t1 - t0, 1), 'render_s': round(time.time() - t1, 1)}))

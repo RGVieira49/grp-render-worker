@@ -14,7 +14,7 @@ e a ficha dos materiais, e entrega os dois por PUT:
     modelo_url, modelo_sha256   como acima (o .blend importado fica no cache e serve aos renders seguintes)
     upload_glb, upload_ficha    links assinados do Estúdio
 """
-import base64, hashlib, json, os, re, shutil, subprocess, tempfile, time, urllib.parse, urllib.request
+import base64, hashlib, json, os, re, shutil, subprocess, sys, tempfile, time, urllib.parse, urllib.request
 
 import runpod
 
@@ -40,6 +40,24 @@ def baixar(url, destino, sha_esperado=None):
     return h.hexdigest()
 
 
+def enxugar(glb):
+    """Junta as cópias idênticas e achata a árvore de grupos (scripts/enxugar.py) antes de o Blender importar.
+    Num anteprojeto de 635 MB: importação de ~55 min para 20 s. Se não der, segue com o arquivo original."""
+    saida = glb + '.enxuto.glb'
+    try:
+        p = subprocess.run([sys.executable, '-I', f'{SCRIPTS}/enxugar.py', glb, saida], capture_output=True, text=True, timeout=900)
+        if p.returncode == 0 and os.path.exists(saida):
+            os.replace(saida, glb)
+            print(p.stdout.strip(), flush=True)
+        else:
+            print(f'enxugar não aplicado ({p.returncode}): {p.stderr[-500:]}', flush=True)
+    except subprocess.TimeoutExpired:
+        print('enxugar passou de 15 min; segue com o original', flush=True)
+    finally:
+        if os.path.exists(saida):
+            os.remove(saida)
+
+
 def preparar_modelo(url, sha):
     """Devolve o caminho de um .blend pronto, usando o cache quando possível."""
     os.makedirs(CACHE, exist_ok=True)
@@ -53,6 +71,7 @@ def preparar_modelo(url, sha):
     if ext == '.blend':
         os.replace(bruto, blend)
         return blend, False
+    enxugar(bruto)
     parcial = blend + '.parcial.blend'
     rodar([BLENDER, '-b', '--factory-startup', '-P', f'{SCRIPTS}/importar.py', '--', bruto, parcial])
     os.replace(parcial, blend)

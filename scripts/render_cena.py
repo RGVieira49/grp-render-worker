@@ -767,6 +767,51 @@ for nome_rev, aj_rev in AJUSTES.items():
     me.materials.append(ma)
     aguas.append({'revestimento': nome_rev, 'cota': nivel, 'm2': round(sum(f.area for f in me.polygons), 1)})
 
+# Quinas e cantos (o que mais denuncia "CG" numa fachada, segundo o archviz profissional):
+# - quina perfeita não existe: o Bevel arredonda a normal em ~6 mm e a aresta pega um fio de luz;
+# - canto e encontro de planos juntam poeira e recebem menos luz: a oclusão local escurece um pouco a cor ali.
+QUINAS = cfg.get('quinas', 0.006 if EXTERNO else 0.0)  # testado no Mac 12/11: frisos com fio de luz, +15–70% de tempo
+SUJEIRA = cfg.get('sujeira', 0.22 if EXTERNO else 0.0)
+quinas_aplicadas = 0
+if QUINAS > 0 or SUJEIRA > 0:
+    for m in bpy.data.materials:
+        if not m.use_nodes or classe_de(m.name) not in SOLIDOS + ('metal', 'outro'):
+            continue
+        nt = m.node_tree
+        pr = next((n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+        if not pr or pr.inputs['Transmission Weight'].default_value > 0.5:
+            continue
+        if QUINAS > 0:
+            bv = nt.nodes.new('ShaderNodeBevel')
+            bv.samples = 4
+            bv.inputs['Radius'].default_value = QUINAS
+            if pr.inputs['Normal'].is_linked:  # mantém o relevo da textura: o Bevel parte da normal dela
+                nt.links.new(pr.inputs['Normal'].links[0].from_socket, bv.inputs['Normal'])
+            nt.links.new(bv.outputs['Normal'], pr.inputs['Normal'])
+        if SUJEIRA > 0:
+            ao = nt.nodes.new('ShaderNodeAmbientOcclusion')
+            ao.samples = 8
+            ao.only_local = True
+            ao.inputs['Distance'].default_value = cfg.get('sujeira_distancia', 0.35)
+            fx = nt.nodes.new('ShaderNodeMapRange')
+            fx.inputs['To Min'].default_value = 1.0 - SUJEIRA
+            fx.inputs['To Max'].default_value = 1.0
+            nt.links.new(ao.outputs['AO'], fx.inputs['Value'])
+            mul = nt.nodes.new('ShaderNodeMix')
+            mul.data_type = 'RGBA'
+            mul.blend_type = 'MULTIPLY'
+            mul.inputs['Factor'].default_value = 1.0
+            if pr.inputs['Base Color'].is_linked:
+                nt.links.new(pr.inputs['Base Color'].links[0].from_socket, mul.inputs[6])
+            else:
+                mul.inputs[6].default_value = pr.inputs['Base Color'].default_value
+            cmb = nt.nodes.new('ShaderNodeCombineColor')
+            for i in range(3):
+                nt.links.new(fx.outputs['Result'], cmb.inputs[i])
+            nt.links.new(cmb.outputs['Color'], mul.inputs[7])
+            nt.links.new(mul.outputs[2], pr.inputs['Base Color'])
+        quinas_aplicadas += 1
+
 # Ajustes do painel de materiais (cor, brilho, relevo) por último: valem sobre tudo o que veio antes.
 for m in bpy.data.materials:
     aj = AJUSTES.get(m.name)
@@ -806,6 +851,31 @@ if EXTERNO:
 # Câmera no alto (varanda, cobertura, vista aérea): o fundo "jardim" foi fotografado do chão e mostrava um
 # gramado na altura do olho a 40 m; lá em cima vai o céu aberto, com horizonte.
 ALTO = bool(cotas) and _cz - z_chao > cfg.get('alto_m', 10)
+
+# Entorno: lá do alto, em volta do terreno era um vazio cinza (a foto do céu não tem chão). Um chão contínuo de
+# terreno gramado, fosco e sem cor forte, na cota mais baixa do modelo, some na névoa de distância como um
+# bairro visto de longe. Do chão (olho a 1,6 m) não entra: o fundo fotográfico já tem árvores e gramado.
+entorno = False
+if EXTERNO and cotas and cfg.get('entorno', ALTO):
+    _zmin = float(np.percentile([z for z, *_ in cotas], 1)) - 0.03
+    _bm = bmesh.new()
+    _r = cfg.get('entorno_raio', 3000.0)
+    _vs = [_bm.verts.new((_c['x'] + dx * _r, _c['y'] + dy * _r, _zmin)) for dx, dy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+    _bm.faces.new(_vs)
+    _me = bpy.data.meshes.new('entorno'); _bm.to_mesh(_me); _bm.free()
+    _ob = bpy.data.objects.new('entorno', _me); sc.collection.objects.link(_ob)
+    _ma = bpy.data.materials.new('entorno'); _ma.use_nodes = True
+    _nt = _ma.node_tree; _pp = next(n for n in _nt.nodes if n.type == 'BSDF_PRINCIPLED')
+    _tc = _nt.nodes.new('ShaderNodeTexCoord'); _nz = _nt.nodes.new('ShaderNodeTexNoise')
+    _nz.inputs['Scale'].default_value = 0.02; _nz.inputs['Detail'].default_value = 8
+    _rp = _nt.nodes.new('ShaderNodeValToRGB')
+    _rp.color_ramp.elements[0].color = (0.10, 0.12, 0.07, 1)   # gramado
+    _rp.color_ramp.elements[1].color = (0.16, 0.15, 0.11, 1)   # terra/seco
+    _nt.links.new(_tc.outputs['Object'], _nz.inputs['Vector']); _nt.links.new(_nz.outputs['Fac'], _rp.inputs['Fac'])
+    _nt.links.new(_rp.outputs['Color'], _pp.inputs['Base Color'])
+    _pp.inputs['Roughness'].default_value = 0.95
+    _me.materials.append(_ma)
+    entorno = True
 if ALTO and cfg.get('ceu_foto_alto'):
     cfg['ceu_foto'] = cfg['ceu_foto_alto']
 w = bpy.data.worlds.new('ceu') if not sc.world else sc.world
@@ -1046,7 +1116,12 @@ for vt in (cfg.get('cor', 'Khronos PBR Neutral'), 'Khronos PBR Neutral', 'AgX'):
         break
     except TypeError:
         continue
-sc.view_settings.look = 'None'
+# "look" (curva de filme do AgX/Filmic): os fotógrafos de fachada usam curva de filme + LUT; o Khronos neutro é o
+# mais chapado de todos. Testável por cena: cfg["cor"] = "AgX", cfg["look"] = "AgX - Punchy" / "AgX - Medium High Contrast".
+try:
+    sc.view_settings.look = cfg.get('look', 'None')
+except TypeError:
+    sc.view_settings.look = 'None'
 W, H = cfg['resolucao']
 
 # 5b. Fotômetro: uma prévia pequena, linear, sem pós. Dela saem a exposição (o ambiente claro, sem
@@ -1089,7 +1164,7 @@ if expo is None or cfg.get('balanco_auto', 0.4) > 0:
         # claros sem estourar) e a sombra escurece sozinha. Pelo meio-tom (regra de dentro) a fachada branca
         # virava um cinza leitoso, sem preto nenhum.
         p95 = float(np.percentile(Y, 95))
-        expo = math.log2(cfg.get('claro_alvo', 0.8) / max(p95, 1e-4))
+        expo = math.log2(cfg.get('claro_alvo', 0.72) / max(p95, 1e-4))
         expo = max(-6.0, min(6.0, expo)) + cfg.get('exposicao_ajuste', 0.0)
     elif expo is None:
         # meio-tom do ambiente em ~0,32 (linear) sem passar 0,95 nos 3% mais claros
@@ -1152,7 +1227,7 @@ cy.adaptive_threshold = cfg.get('limiar_ruido', 0.01)
 sc.view_settings.exposure = expo
 sc.view_settings.use_curve_mapping = False
 
-pos = dict({'contraste': 0.24, 'saturacao': 1.12} if EXTERNO else {}, **cfg.get('pos', {}))  # fora: mais "punch", como foto de fachada
+pos = dict({'contraste': 0.32, 'saturacao': 1.2} if EXTERNO else {}, **cfg.get('pos', {}))  # 12/11: AgX/ACES testados e descartados (tiram cor do branco)  # fora: mais "punch", como foto de fachada
 if pos.get('contraste', 0.16) > 0:
     # curva em S suave, no espaço da tela (depois do mapeamento de cor): sombras mais fundas, altas preservadas
     k = pos.get('contraste', 0.16)
@@ -1260,7 +1335,7 @@ print('RESUMO', json.dumps({'materiais': contagem, 'suavizadas': suavizadas, 'fi
                             'pisos_polidos': pisos_polidos, 'pisos_foscos': pisos_foscos, 'spots': spots, 'piso_z': round(z0, 3),
                             'cor': sc.view_settings.view_transform, 'exposicao': round(expo, 2),
                             'balanco': [round(g, 3) for g in ganhos], 'fotometro': medida, 'luz': cfg.get('luz', 'dia'),
-                            'externo': EXTERNO, 'aguas': aguas, 'folhas': folhas, 'duplicadas': duplicadas, 'alfas_removidos': alfas_removidos, 'recuadas': recuadas, 'faces_duplas': faces_duplas, 'vidros_externos': vidros_externos, 'neblina': nevoa if nevoa_cor is not None else 0, 'alto': ALTO, 'ceu_visto': round(CEU_VISTO, 2), 'sol_azimute': round(luz['azimute'], 1),
+                            'externo': EXTERNO, 'entorno': entorno, 'quinas': quinas_aplicadas, 'look': sc.view_settings.look, 'transformacao': sc.view_settings.view_transform, 'aguas': aguas, 'folhas': folhas, 'duplicadas': duplicadas, 'alfas_removidos': alfas_removidos, 'recuadas': recuadas, 'faces_duplas': faces_duplas, 'vidros_externos': vidros_externos, 'neblina': nevoa if nevoa_cor is not None else 0, 'alto': ALTO, 'ceu_visto': round(CEU_VISTO, 2), 'sol_azimute': round(luz['azimute'], 1),
                             'ceu_forca': ceu_forca and round(ceu_forca, 3),
                             'device': cy.device + ':' + prefs.compute_device_type,
                             'preparo_s': round(t1 - t0, 1), 'render_s': round(time.time() - t1, 1)}))

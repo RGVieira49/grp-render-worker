@@ -830,15 +830,17 @@ if expo is None or cfg.get('balanco_auto', 0.4) > 0:
             # dominante = quanto o "branco" está quente (ambiente fechado, só com spots de 3000 K) ou frio;
             # dominante leve → correção leve (mantém o clima); dominante forte → corrige quase tudo
             dominante = float(max(mr, mb) / max(min(mr, mb), 1e-5))
-            k = cfg.get('balanco_auto', 0.9 if EXTERNO else 0.4)
-            # dentro guarda um pouco do calor; fora a fachada tem de mostrar a cor do projeto
-            k = float(np.clip(k + max(0.0, dominante - 1.12) * 2.5, k, 1.0 if EXTERNO else 0.75))
+            # dentro guarda um pouco do calor; fora a fachada tem de mostrar a cor do projeto — menos ao fim de
+            # tarde, em que o dourado É a foto (com balanço completo a luz quente virava branca)
+            neutro_total = EXTERNO and cfg.get('luz', 'dia') != 'tarde'
+            k = cfg.get('balanco_auto', 0.9 if neutro_total else 0.4)
+            k = float(np.clip(k + max(0.0, dominante - 1.12) * 2.5, k, 1.0 if neutro_total else 0.75))
             ganhos = tuple(float(np.clip((mg / max(v, 1e-5)) ** k, 0.7, 1.35)) for v in (mr, mg, mb))
             medida_balanco = dict(dominante=round(dominante, 3), forca=round(k, 2))
     medida = dict(chave=round(chave, 4), p97=round(p97, 4), **medida_balanco)
     bpy.data.images.remove(im)
 # Um toque de calor, como a foto de interiores de lançamento (a luz do céu deixa tudo levemente azulado)
-calor = cfg.get('calor', 0.0 if EXTERNO else 0.03) if medida_balanco.get('dominante', 1.0) < 1.12 else 0.0
+calor = cfg.get('calor', 0.0 if EXTERNO and cfg.get('luz', 'dia') != 'tarde' else 0.03) if medida_balanco.get('dominante', 1.0) < 1.12 else 0.0
 ganhos = (ganhos[0] * (1 + calor), ganhos[1], ganhos[2] * (1 - calor * 1.3))
 ceu_forca = None
 if EXTERNO and cfg.get('ceu_foto'):

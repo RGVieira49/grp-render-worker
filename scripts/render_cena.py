@@ -18,6 +18,44 @@ from limpeza import pecas_soltas  # noqa: E402 (mesmo critério da versão leve)
 for o in pecas_soltas(malhas)[0]:  # peças soltas longe do modelo
     o.hide_render = True
 
+# Peça sem material colada no revestimento: no SketchUp o grupo "sem tinta" (cor herdada) e a pastilha/pedra
+# aplicada por cima ficam exatamente no mesmo plano. O render sorteia qual face aparece (na GPU saía a pastilha,
+# no Mac a parede de trás, preta). As peças sem material recuam 2 mm para dentro: o revestimento sempre vence,
+# e peça solta (letreiro, banco) não muda de forma visível.
+duplicadas = 0
+# a mesma malha duas vezes no mesmo lugar (componente colado em cima dele mesmo): uma faz sombra na outra
+# (cada ponto "vê" a gêmea a 0 mm) e a face sai preta. Fica uma só.
+_lugares = set()
+for o in malhas:
+    if o.hide_render:
+        continue
+    k = (o.data.name, tuple(round(x, 4) for linha in o.matrix_world for x in linha))
+    if k in _lugares:
+        o.hide_render = True
+        duplicadas += 1
+    else:
+        _lugares.add(k)
+
+recuadas = 0
+if cfg.get('recuar_sem_material', 0.002) > 0:
+    _feitas = set()
+    for o in malhas:
+        if o.hide_render or (o.material_slots and any(sl.material for sl in o.material_slots)) or o.data.name in _feitas or len(o.data.vertices) < 3:
+            continue
+        _feitas.add(o.data.name)
+        _esc = max(1e-9, abs(o.matrix_world.determinant()) ** (1 / 3))  # metros por unidade local
+        _co = np.empty(len(o.data.vertices) * 3, np.float32)
+        o.data.vertices.foreach_get('co', _co)
+        _co = _co.reshape(-1, 3)
+        # encolhe como uma caixa, eixo a eixo: cada face anda 2 mm para dentro na direção dela (para o centro
+        # em linha reta, numa peça comprida a face deslizava ao longo da parede e não recuava)
+        _centro = (_co.min(0) + _co.max(0)) / 2
+        _dir = _centro - _co
+        _co += np.sign(_dir) * np.minimum(cfg.get('recuar_sem_material', 0.002) / _esc, np.abs(_dir) * 0.25)
+        o.data.vertices.foreach_set('co', _co.ravel())
+        o.data.update()
+        recuadas += 1
+
 # Peças espelhadas no SketchUp chegam com as normais personalizadas invertidas (o render vê o avesso
 # e pinta de preto). Sem a normal personalizada, o Blender recalcula a frente certa pela geometria.
 espelhadas = 0
@@ -29,6 +67,7 @@ for o in malhas:
 # Suavização por ângulo (como o V-Ray/Enscape fazem com modelo do SketchUp): superfícies curvas de poucos
 # polígonos (luminária, travesseiro, almofada) ficam lisas; quinas acima de 40° continuam vivas.
 suavizadas = 0
+faces_duplas = 0
 if cfg.get('suavizar', True):
     angulo = math.radians(cfg.get('suavizar_angulo', 40))
     vistos = set()
@@ -44,6 +83,25 @@ if cfg.get('suavizar', True):
         bm = bmesh.new()
         bm.from_mesh(me)
         bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.0002)
+        # face dupla (frente e verso no mesmo lugar, comum no SketchUp): depois de soldar, as duas dividem os
+        # vértices, a suavização soma normais opostas e a face sai preta. Fica uma só — a que tem material.
+        _tem_mat = [bool(sl.material) for sl in o.material_slots]
+        _vistas, _dup = {}, []
+        for f in bm.faces:
+            k = frozenset(f.verts)
+            if k not in _vistas:
+                _vistas[k] = f
+                continue
+            g = _vistas[k]
+            f_ok = f.material_index < len(_tem_mat) and _tem_mat[f.material_index]
+            g_ok = g.material_index < len(_tem_mat) and _tem_mat[g.material_index]
+            if f_ok and not g_ok:
+                _dup.append(g); _vistas[k] = f
+            else:
+                _dup.append(f)
+        if _dup:
+            bmesh.ops.delete(bm, geom=_dup, context='FACES_ONLY')
+            faces_duplas += len(_dup)
         bm.to_mesh(me)
         bm.free()
         try:
@@ -65,7 +123,7 @@ ACABAMENTO = {
     'tapete': dict(rug=0.95, brilho_tecido=0.4), 'tecido': dict(rug=0.92, brilho_tecido=0.4),
     'couro': dict(rug=0.45), 'cimento_queimado': dict(rug=0.55), 'pedra': dict(rug=0.14),
     'ceramica': dict(rug=0.2, relevo=0.05), 'textura_parede': dict(rug=0.85, relevo=0.06),
-    'laca': dict(rug=0.22), 'plastico': dict(rug=0.3), 'planta': dict(rug=0.5, translucencia=0.25),
+    'laca': dict(rug=0.22), 'plastico': dict(rug=0.3), 'planta': dict(rug=0.55),
     'pintura': dict(rug=0.85), 'outro': dict(rug=0.6), 'luz_pintada': dict(rug=0.8),
     # áreas externas: calçada/porcelanato externo (o relevo vem do rejunte da própria textura), asfalto, grama
     'piso_externo': dict(rug=0.8, relevo=0.04), 'asfalto': dict(rug=0.9), 'grama': dict(rug=0.95),
@@ -74,6 +132,7 @@ ACABAMENTO = {
 # a luz rebatida entre paredes "brancas demais" clareava as sombras. O tom não muda, só o teto físico.
 ALBEDO_MAX = cfg.get('albedo_max', 0.85)
 SEM_TETO = ('vidro', 'agua', 'espelho', 'metal', 'luz_pintada')
+SOLIDOS = ('ceramica', 'pedra', 'piso_externo', 'textura_parede', 'pintura', 'madeira', 'piso_madeira', 'cimento_queimado', 'asfalto', 'laca')
 # Texturas físicas CC0 (Poly Haven) e o tamanho real de uma repetição, em metros.
 # "trocar": a cor vem da textura fina (casada com a cor média do original);
 # senão a cor do arquiteto fica e a textura fina entra só no relevo e no brilho.
@@ -331,8 +390,83 @@ def aplicar_ajustes(nt, pr, aj):
             n.inputs['Strength'].default_value *= float(aj['relevo'])
 
 
+def folhagem(m, nt, pr):
+    """Folha de verdade em vez de plástico: o SketchUp manda folha lisa, saturada e com brilho de verniz.
+    - luz que atravessa a folha (Translucent BSDF), não "subsurface" (que deixa a folha cerosa);
+    - cor variando de planta para planta (célula de ~1,5 m no espaço: cada touceira com um verde);
+    - verde um pouco mais escuro e menos saturado (folha real tem albedo ~0,1–0,25);
+    - brilho fosco-acetinado com variação, sem verniz;
+    - o recorte da folha (alfa da textura) continua valendo."""
+    saida = next((n for n in nt.nodes if n.type == 'OUTPUT_MATERIAL' and n.is_active_output), None)
+    if not saida:
+        return
+    pr.inputs['Subsurface Weight'].default_value = 0.0
+    pr.inputs['Coat Weight'].default_value = 0.0
+    pr.inputs['Specular IOR Level'].default_value = cfg.get('folha_especular', 0.35)
+    if not pr.inputs['Roughness'].is_linked:
+        pr.inputs['Roughness'].default_value = 0.55
+    # variação por touceira
+    pos = nt.nodes.new('ShaderNodeNewGeometry')
+    vor = nt.nodes.new('ShaderNodeTexVoronoi')
+    vor.inputs['Scale'].default_value = 0.6
+    nt.links.new(pos.outputs['Position'], vor.inputs['Vector'])
+    sep = nt.nodes.new('ShaderNodeSeparateColor')
+    nt.links.new(vor.outputs['Color'], sep.inputs['Color'])
+    hsv = nt.nodes.new('ShaderNodeHueSaturation')
+    faixa_h = nt.nodes.new('ShaderNodeMapRange')
+    faixa_h.inputs['To Min'].default_value, faixa_h.inputs['To Max'].default_value = 0.48, 0.53  # ± ~2% de matiz
+    nt.links.new(sep.outputs[0], faixa_h.inputs['Value'])
+    nt.links.new(faixa_h.outputs['Result'], hsv.inputs['Hue'])
+    faixa_v = nt.nodes.new('ShaderNodeMapRange')
+    escuro = cfg.get('folha_valor', 0.78)
+    faixa_v.inputs['To Min'].default_value, faixa_v.inputs['To Max'].default_value = escuro * 0.8, escuro * 1.15
+    nt.links.new(sep.outputs[1], faixa_v.inputs['Value'])
+    nt.links.new(faixa_v.outputs['Result'], hsv.inputs['Value'])
+    hsv.inputs['Saturation'].default_value = cfg.get('folha_saturacao', 0.88)
+    if pr.inputs['Base Color'].is_linked:
+        nt.links.new(pr.inputs['Base Color'].links[0].from_socket, hsv.inputs['Color'])
+    else:
+        hsv.inputs['Color'].default_value = pr.inputs['Base Color'].default_value
+    nt.links.new(hsv.outputs['Color'], pr.inputs['Base Color'])
+    # luz atravessando: a folha contra o sol acende em verde-amarelado
+    tr = nt.nodes.new('ShaderNodeBsdfTranslucent')
+    tinta = nt.nodes.new('ShaderNodeMix')
+    tinta.data_type = 'RGBA'
+    tinta.blend_type = 'MULTIPLY'
+    tinta.inputs['Factor'].default_value = 1.0
+    nt.links.new(hsv.outputs['Color'], tinta.inputs[6])
+    tinta.inputs[7].default_value = (1.1, 1.15, 0.6, 1)
+    nt.links.new(tinta.outputs[2], tr.inputs['Color'])
+    mix = nt.nodes.new('ShaderNodeMixShader')
+    mix.inputs['Fac'].default_value = cfg.get('folha_translucida', 0.3)
+    nt.links.new(pr.outputs['BSDF'], mix.inputs[1])
+    nt.links.new(tr.outputs['BSDF'], mix.inputs[2])
+    final = mix.outputs['Shader']
+    if pr.inputs['Alpha'].is_linked:  # o recorte da folha vale para as duas partes
+        alfa = pr.inputs['Alpha'].links[0].from_socket
+        nt.links.remove(pr.inputs['Alpha'].links[0])
+        pr.inputs['Alpha'].default_value = 1.0
+        vazio = nt.nodes.new('ShaderNodeBsdfTransparent')
+        corte = nt.nodes.new('ShaderNodeMixShader')
+        nt.links.new(alfa, corte.inputs['Fac'])
+        nt.links.new(vazio.outputs['BSDF'], corte.inputs[1])
+        nt.links.new(final, corte.inputs[2])
+        final = corte.outputs['Shader']
+    elif pr.inputs['Alpha'].default_value < 1.0:
+        vazio = nt.nodes.new('ShaderNodeBsdfTransparent')
+        corte = nt.nodes.new('ShaderNodeMixShader')
+        corte.inputs['Fac'].default_value = pr.inputs['Alpha'].default_value
+        pr.inputs['Alpha'].default_value = 1.0
+        nt.links.new(vazio.outputs['BSDF'], corte.inputs[1])
+        nt.links.new(final, corte.inputs[2])
+        final = corte.outputs['Shader']
+    nt.links.new(final, saida.inputs['Surface'])
+
+
 contagem, trocadas = {}, []
 luzes_pintadas = set()
+folhas = 0
+alfas_removidos = 0
 for m in bpy.data.materials:
     if not m.use_nodes:
         continue
@@ -348,6 +482,12 @@ for m in bpy.data.materials:
     if not pr.inputs['Roughness'].is_linked:
         pr.inputs['Roughness'].default_value = p['rug']
     pr.inputs['Metallic'].default_value = 1.0 if cl in ('metal', 'espelho') else 0.0
+    # Acabamento sólido não é transparente: o PNG do SketchUp às vezes traz canal alfa (a pastilha do letreiro do
+    # Kala), e o render mostrava o oco escuro atrás. Alfa só vale em folha, alambrado/grade (metal) e vidro.
+    if cl in SOLIDOS and pr.inputs['Alpha'].is_linked:
+        nt.links.remove(pr.inputs['Alpha'].links[0])
+        pr.inputs['Alpha'].default_value = 1.0
+        alfas_removidos += 1
     if cl not in SEM_TETO and not pr.inputs['Base Color'].is_linked:
         bc = pr.inputs['Base Color'].default_value
         mx = max(bc[0], bc[1], bc[2])
@@ -386,6 +526,10 @@ for m in bpy.data.materials:
     if p.get('brilho_tecido'):
         pr.inputs['Sheen Weight'].default_value = p['brilho_tecido']
         pr.inputs['Sheen Roughness'].default_value = 0.4
+    if cl == 'planta' and cfg.get('folha_real', True):
+        folhagem(m, nt, pr)
+        folhas += 1
+        continue
     if p.get('translucencia'):
         pr.inputs['Subsurface Weight'].default_value = p['translucencia']
     if p.get('verniz'):  # madeira com verniz acetinado: um brilho fino por cima do veio
@@ -522,6 +666,21 @@ for nome, a in areas_piso.items():
     if pr and not pr.inputs['Roughness'].is_linked and pr.inputs['Metallic'].default_value < 0.5:
         pr.inputs['Roughness'].default_value = cfg.get('piso_rugosidade', 0.1)
         pisos_polidos.append(nome)
+
+# Fora, a janela de verdade é um espelho escuro: reflete o céu e o entorno. Com IOR 1,5 num plano só, ela
+# saía como um quadrado preto (o interior do anteprojeto é vazio e escuro). Reflexo mais forte, sem brilho fosco.
+vidros_externos = 0
+if EXTERNO:
+    for m in bpy.data.materials:
+        if not m.use_nodes or classe_de(m.name) != 'vidro':
+            continue
+        pr = next((n for n in m.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+        if not pr:
+            continue
+        pr.inputs['IOR'].default_value = cfg.get('vidro_ior_externo', 1.75)
+        if not pr.inputs['Roughness'].is_linked:
+            pr.inputs['Roughness'].default_value = 0.0
+        vidros_externos += 1
 
 # Ninguém tem superfície perfeitamente uniforme: uma variação leve na rugosidade tira o "ar de CG".
 for m in bpy.data.materials:
@@ -662,7 +821,16 @@ if hasattr(sky, 'sun_disc'):
 bg = wn.nodes.new('ShaderNodeBackground')
 bg.inputs['Strength'].default_value = luz['ceu']
 out = wn.nodes.new('ShaderNodeOutputWorld')
-wn.links.new(sky.outputs['Color'], bg.inputs['Color'])
+# Fora, a sombra recebe o céu azul puro e sai azul-piscina; na foto real o chão quente e as paredes devolvem luz
+# e a sombra fica cinza-azulada. O céu que ilumina perde parte da cor (não o que a câmera vê).
+sat_ceu = cfg.get('ceu_saturacao', 0.55 if EXTERNO else 1.0)
+if sat_ceu != 1.0:
+    hs_ceu = wn.nodes.new('ShaderNodeHueSaturation')
+    hs_ceu.inputs['Saturation'].default_value = sat_ceu
+    wn.links.new(sky.outputs['Color'], hs_ceu.inputs['Color'])
+    wn.links.new(hs_ceu.outputs['Color'], bg.inputs['Color'])
+else:
+    wn.links.new(sky.outputs['Color'], bg.inputs['Color'])
 if cfg.get('ceu_foto'):
     # Céu fotográfico (HDRI CC0) só no que a câmera vê pela janela e nos reflexos;
     # a luz que entra no ambiente continua vindo do céu físico + sol, controláveis por hora.
@@ -949,9 +1117,12 @@ if expo is None or cfg.get('balanco_auto', 0.4) > 0:
     medida = dict(chave=round(chave, 4), p97=round(p97, 4), **medida_balanco)
     bpy.data.images.remove(im)
 # Um toque de calor, como a foto de interiores de lançamento (a luz do céu deixa tudo levemente azulado)
-calor = cfg.get('calor', 0.0 if EXTERNO and cfg.get('luz', 'dia') != 'tarde' else 0.03) if medida_balanco.get('dominante', 1.0) < 1.12 else 0.0
+# Fora: a referência (lançamentos com foto de agência) tem o branco no sol levemente quente; ao fim de tarde mais.
+_calor_padrao = (0.05 if cfg.get('luz', 'dia') == 'tarde' else 0.035) if EXTERNO else 0.03
+calor = cfg.get('calor', _calor_padrao) if (EXTERNO or medida_balanco.get('dominante', 1.0) < 1.12) else 0.0
 ganhos = (ganhos[0] * (1 + calor), ganhos[1], ganhos[2] * (1 - calor * 1.3))
 ceu_forca = None
+nevoa_cor = None
 if EXTERNO and cfg.get('ceu_foto'):
     # A foto do céu aparece com a mesma claridade em qualquer exposição: média do hemisfério de cima
     # (sem o disco do sol) levada a "ceu_alvo" na tela. Antes, a exposição medida no prédio escurecia o céu.
@@ -961,6 +1132,12 @@ if EXTERNO and cfg.get('ceu_foto'):
     Yc = fp @ np.array([0.2126, 0.7152, 0.0722], np.float32)
     Yc = Yc[Yc < np.percentile(Yc, 99.5)]
     ceu_forca = float(np.clip(cfg.get('ceu_alvo', 0.6) / max(float(Yc.mean()), 1e-4) / 2 ** expo, 0.05, 50))
+    # cor da névoa de distância = o horizonte da foto do céu, como a câmera vê
+    _hh = env.image.size[1]
+    _ff = np.empty(env.image.size[0] * _hh * 4, np.float32)
+    env.image.pixels.foreach_get(_ff)
+    _bh = _ff.reshape(_hh, env.image.size[0], 4)[_hh // 2 + 2:_hh // 2 + max(4, _hh // 30), ::8, :3].reshape(-1, 3)
+    nevoa_cor = np.clip(np.median(_bh, axis=0) * ceu_forca, 0, 50)
     # só no que a câmera vê: nos reflexos o céu continua com a força de antes (senão a rua vira espelho de nuvem)
     bg_cam = wn.nodes.new('ShaderNodeBackground')
     bg_cam.inputs['Strength'].default_value = ceu_forca
@@ -1000,6 +1177,36 @@ if ganhos != (1.0, 1.0, 1.0):
     L.new(ultimo, wb.inputs[6])
     wb.inputs[7].default_value = (*ganhos, 1)
     ultimo = wb.outputs[2]
+# Perspectiva aérea: o que está longe ganha o véu da cor do horizonte (a foto real tem ar entre a câmera e o
+# prédio do fundo). Sem isso tudo fica nítido e saturado igual, perto e longe — cara de maquete.
+nevoa = cfg.get('neblina', 0.22 if EXTERNO else 0.0)
+if nevoa > 0 and nevoa_cor is not None:
+    sc.view_layers[0].use_pass_mist = True
+    w.mist_settings.start = cfg.get('neblina_inicio', 30.0)
+    w.mist_settings.depth = cfg.get('neblina_fim', 900.0)
+    w.mist_settings.falloff = 'LINEAR'
+    def _math(op):
+        try:
+            n = N.new('ShaderNodeMath')
+        except RuntimeError:
+            n = N.new('CompositorNodeMath')
+        n.operation = op
+        return n
+    so_geo = _math('LESS_THAN')  # o céu (mist = 1) já é o horizonte: não leva véu de novo
+    L.new(rl.outputs['Mist'], so_geo.inputs[0])
+    so_geo.inputs[1].default_value = 0.999
+    forca_n = _math('MULTIPLY')
+    L.new(rl.outputs['Mist'], forca_n.inputs[0])
+    forca_n.inputs[1].default_value = nevoa
+    fator = _math('MULTIPLY')
+    L.new(forca_n.outputs[0], fator.inputs[0])
+    L.new(so_geo.outputs[0], fator.inputs[1])
+    vu = N.new('ShaderNodeMix')
+    vu.data_type = 'RGBA'
+    L.new(fator.outputs[0], vu.inputs['Factor'])
+    L.new(ultimo, vu.inputs[6])
+    vu.inputs[7].default_value = (*[float(v) for v in nevoa_cor], 1)
+    ultimo = vu.outputs[2]
 if pos.get('ligado', True):
     if pos.get('brilho', 0.0) > 0:  # "brilho em volta da luz" (bloom): desligado por padrão, estoura os metais
         glare = N.new('CompositorNodeGlare')
@@ -1053,7 +1260,7 @@ print('RESUMO', json.dumps({'materiais': contagem, 'suavizadas': suavizadas, 'fi
                             'pisos_polidos': pisos_polidos, 'pisos_foscos': pisos_foscos, 'spots': spots, 'piso_z': round(z0, 3),
                             'cor': sc.view_settings.view_transform, 'exposicao': round(expo, 2),
                             'balanco': [round(g, 3) for g in ganhos], 'fotometro': medida, 'luz': cfg.get('luz', 'dia'),
-                            'externo': EXTERNO, 'aguas': aguas, 'alto': ALTO, 'ceu_visto': round(CEU_VISTO, 2), 'sol_azimute': round(luz['azimute'], 1),
+                            'externo': EXTERNO, 'aguas': aguas, 'folhas': folhas, 'duplicadas': duplicadas, 'alfas_removidos': alfas_removidos, 'recuadas': recuadas, 'faces_duplas': faces_duplas, 'vidros_externos': vidros_externos, 'neblina': nevoa if nevoa_cor is not None else 0, 'alto': ALTO, 'ceu_visto': round(CEU_VISTO, 2), 'sol_azimute': round(luz['azimute'], 1),
                             'ceu_forca': ceu_forca and round(ceu_forca, 3),
                             'device': cy.device + ':' + prefs.compute_device_type,
                             'preparo_s': round(t1 - t0, 1), 'render_s': round(time.time() - t1, 1)}))

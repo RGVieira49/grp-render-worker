@@ -387,6 +387,39 @@ for m in bpy.data.materials:
         nt.links.new(tex.outputs['Color'], bump.inputs['Height'])
         nt.links.new(bump.outputs['Normal'], pr.inputs['Normal'])
 
+# 1b. Câmera dentro ou fora? Fora (fachada, área de lazer, rua) o céu aparece em boa parte das direções de
+# cima; dentro (apartamento, varanda coberta) a laje esconde. As regras de interior (piso acetinado, rebatedor,
+# spots, fitas de LED) não valem fora, e o sol passa a vir de trás da câmera, como o fotógrafo de fachada escolhe.
+_dg = bpy.context.evaluated_depsgraph_get()
+_c = cfg['camera']
+
+
+def _piso_simples(x, y):
+    zs, z = [], 1.5
+    while True:
+        ok, loc, *_ = sc.ray_cast(_dg, Vector((x, y, z)), Vector((0, 0, -1)))
+        if not ok:
+            break
+        zs.append(loc.z)
+        z = loc.z - 0.001
+    return max(v for v in zs if v < min(zs) + 0.4) if zs else 0.0
+
+
+def ceu_visto(x, y, z):
+    livres = total = 0
+    for el in (35, 60, 85):
+        for k in range(8):
+            az, e = k * math.pi / 4, math.radians(el)
+            ok, *_ = sc.ray_cast(_dg, Vector((x, y, z)), Vector((math.cos(az) * math.cos(e), math.sin(az) * math.cos(e), math.sin(e))))
+            total += 1
+            livres += 0 if ok else 1
+    return livres / total
+
+
+_cz = _c['z'] if 'z' in _c else _piso_simples(_c['x'], _c['y']) + _c.get('altura', 1.3)
+CEU_VISTO = ceu_visto(_c['x'], _c['y'], _cz)
+EXTERNO = bool(cfg['externo']) if 'externo' in cfg else CEU_VISTO >= 0.3
+
 # 2b. Piso: o material que cobre o chão (faces horizontais na cota mais baixa) vira porcelanato
 # acetinado com reflexo, salvo se for madeira, tapete ou tecido. O SketchUp não diz o que é piso.
 areas_piso, cotas = {}, []
@@ -414,10 +447,19 @@ if cotas:
         if abs(z - z_chao) < 0.06 and mi < len(o.material_slots) and o.material_slots[mi].material:
             nome = o.material_slots[mi].material.name
             areas_piso[nome] = areas_piso.get(nome, 0) + a
-pisos_polidos = []
+pisos_polidos, pisos_foscos = [], []
+if EXTERNO:
+    # fora, o chão (asfalto, calçada, grama, concreto) é fosco; o SketchUp manda tudo meio brilhante
+    for nome, a in areas_piso.items():
+        m = bpy.data.materials.get(nome)
+        pr = next((n for n in m.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None) if m and m.use_nodes else None
+        if a >= 3 and pr and not pr.inputs['Roughness'].is_linked and pr.inputs['Metallic'].default_value < 0.5:
+            pr.inputs['Roughness'].default_value = max(pr.inputs['Roughness'].default_value, cfg.get('chao_externo_rugosidade', 0.85))
+            pr.inputs['Specular IOR Level'].default_value = min(pr.inputs['Specular IOR Level'].default_value, 0.3)
+            pisos_foscos.append(nome)
 for nome, a in areas_piso.items():
     m = bpy.data.materials.get(nome)
-    if a < 3 or not m or not m.use_nodes or classe_de(nome) in ('madeira', 'piso_madeira', 'tapete', 'tecido', 'boucle', 'suede'):
+    if EXTERNO or a < 3 or not m or not m.use_nodes or classe_de(nome) in ('madeira', 'piso_madeira', 'tapete', 'tecido', 'boucle', 'suede'):
         continue
     pr = next((n for n in m.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None)
     if pr and not pr.inputs['Roughness'].is_linked and pr.inputs['Metallic'].default_value < 0.5:
@@ -472,6 +514,15 @@ if 'rebatedor_watts' in cfg:
     luz['rebatedor'] = cfg['rebatedor_watts']
 if 'spot_watts' in cfg:
     luz['spots'] = cfg['spot_watts']
+if EXTERNO:
+    luz['rebatedor'] = 0  # o painel do teto é truque de interior
+    luz['spots'] = 0      # de dia, de fora, as luminárias apagadas não aparecem
+    if 'ceu_forca' not in cfg and luz['forca'] > 0:
+        luz['ceu'] *= 0.2  # dia de sol: o sol manda (~4:1 sobre o céu); a calibração de interior deixava a fachada chapada e azul
+    if 'azimute' not in cfg.get('sol', {}):
+        # sol de trás da câmera, 40° de lado: a fachada enquadrada fica iluminada e as varandas ganham sombra
+        rumo = math.degrees(math.atan2(_c['alvo_x'] - _c['x'], _c['alvo_y'] - _c['y']))
+        luz['azimute'] = (rumo + 180 + cfg.get('sol_lado', 40)) % 360
 
 w = bpy.data.worlds.new('ceu') if not sc.world else sc.world
 sc.world = w
@@ -586,7 +637,7 @@ if cfg.get('acender_spots', True) and luz['spots'] > 0:
 # virada para baixo — como a fita escondida sob o armário ou atrás da cabeceira.
 fitas = 0
 for o in malhas:
-    if o.hide_render or not any(s and s.name in luzes_pintadas for s in o.data.materials):
+    if EXTERNO or o.hide_render or not any(s and s.name in luzes_pintadas for s in o.data.materials):
         continue
     cantos = [o.matrix_world @ Vector(v) for v in o.bound_box]
     x0, x1 = min(v.x for v in cantos), max(v.x for v in cantos)
@@ -703,11 +754,17 @@ if expo is None or cfg.get('balanco_auto', 0.4) > 0:
     r.image_settings.color_depth = '32'
     previa = os.path.join(tempfile.mkdtemp(), 'previa.exr')
     r.filepath = previa
+    r.film_transparent = EXTERNO  # fora, o céu não entra na conta: a exposição e o branco saem do prédio
     bpy.ops.render.render(write_still=True)
+    r.film_transparent = False
     im = bpy.data.images.load(previa)
     px = np.empty(im.size[0] * im.size[1] * 4, np.float32)
     im.pixels.foreach_get(px)
-    rgb = px.reshape(-1, 4)[:, :3]
+    px = px.reshape(-1, 4)
+    if EXTERNO:
+        cheio = px[:, 3] > 0.99
+        px = px[cheio] if cheio.sum() > 500 else px
+    rgb = px[:, :3]
     Y = rgb @ np.array([0.2126, 0.7152, 0.0722], np.float32)
     ok = Y > 1e-5
     rgb, Y = rgb[ok], Y[ok]
@@ -730,15 +787,35 @@ if expo is None or cfg.get('balanco_auto', 0.4) > 0:
             # dominante = quanto o "branco" está quente (ambiente fechado, só com spots de 3000 K) ou frio;
             # dominante leve → correção leve (mantém o clima); dominante forte → corrige quase tudo
             dominante = float(max(mr, mb) / max(min(mr, mb), 1e-5))
-            k = cfg.get('balanco_auto', 0.4)
-            k = float(np.clip(k + max(0.0, dominante - 1.12) * 2.5, k, 0.75))  # guarda um pouco do calor
+            k = cfg.get('balanco_auto', 0.9 if EXTERNO else 0.4)
+            # dentro guarda um pouco do calor; fora a fachada tem de mostrar a cor do projeto
+            k = float(np.clip(k + max(0.0, dominante - 1.12) * 2.5, k, 1.0 if EXTERNO else 0.75))
             ganhos = tuple(float(np.clip((mg / max(v, 1e-5)) ** k, 0.7, 1.35)) for v in (mr, mg, mb))
             medida_balanco = dict(dominante=round(dominante, 3), forca=round(k, 2))
     medida = dict(chave=round(chave, 4), p97=round(p97, 4), **medida_balanco)
     bpy.data.images.remove(im)
 # Um toque de calor, como a foto de interiores de lançamento (a luz do céu deixa tudo levemente azulado)
-calor = cfg.get('calor', 0.03) if medida_balanco.get('dominante', 1.0) < 1.12 else 0.0
+calor = cfg.get('calor', 0.0 if EXTERNO else 0.03) if medida_balanco.get('dominante', 1.0) < 1.12 else 0.0
 ganhos = (ganhos[0] * (1 + calor), ganhos[1], ganhos[2] * (1 - calor * 1.3))
+ceu_forca = None
+if EXTERNO and cfg.get('ceu_foto'):
+    # A foto do céu aparece com a mesma claridade em qualquer exposição: média do hemisfério de cima
+    # (sem o disco do sol) levada a "ceu_alvo" na tela. Antes, a exposição medida no prédio escurecia o céu.
+    fp = np.empty(env.image.size[0] * env.image.size[1] * 4, np.float32)
+    env.image.pixels.foreach_get(fp)
+    fp = fp.reshape(env.image.size[1], env.image.size[0], 4)[env.image.size[1] // 2:, ::4, :3].reshape(-1, 3)
+    Yc = fp @ np.array([0.2126, 0.7152, 0.0722], np.float32)
+    Yc = Yc[Yc < np.percentile(Yc, 99.5)]
+    ceu_forca = float(np.clip(cfg.get('ceu_alvo', 0.9) / max(float(Yc.mean()), 1e-4) / 2 ** expo, 0.05, 50))
+    # só no que a câmera vê: nos reflexos o céu continua com a força de antes (senão a rua vira espelho de nuvem)
+    bg_cam = wn.nodes.new('ShaderNodeBackground')
+    bg_cam.inputs['Strength'].default_value = ceu_forca
+    wn.links.new(env.outputs['Color'], bg_cam.inputs['Color'])
+    mix_cam = wn.nodes.new('ShaderNodeMixShader')
+    wn.links.new(caminho.outputs['Is Camera Ray'], mix_cam.inputs['Fac'])
+    wn.links.new(mix.outputs['Shader'], mix_cam.inputs[1])
+    wn.links.new(bg_cam.outputs['Background'], mix_cam.inputs[2])
+    wn.links.new(mix_cam.outputs['Shader'], out.inputs['Surface'])
 cy.samples = cfg.get('amostras', 128)
 cy.adaptive_threshold = cfg.get('limiar_ruido', 0.01)
 sc.view_settings.exposure = expo
@@ -819,8 +896,10 @@ sc.render.filepath = cfg['saida']
 t1 = time.time()
 bpy.ops.render.render(write_still=True)
 print('RESUMO', json.dumps({'materiais': contagem, 'suavizadas': suavizadas, 'fitas_led': fitas, 'texturas_trocadas': trocadas, 'espelhadas': espelhadas,
-                            'pisos_polidos': pisos_polidos, 'spots': spots, 'piso_z': round(z0, 3),
+                            'pisos_polidos': pisos_polidos, 'pisos_foscos': pisos_foscos, 'spots': spots, 'piso_z': round(z0, 3),
                             'cor': sc.view_settings.view_transform, 'exposicao': round(expo, 2),
                             'balanco': [round(g, 3) for g in ganhos], 'fotometro': medida, 'luz': cfg.get('luz', 'dia'),
+                            'externo': EXTERNO, 'ceu_visto': round(CEU_VISTO, 2), 'sol_azimute': round(luz['azimute'], 1),
+                            'ceu_forca': ceu_forca and round(ceu_forca, 3),
                             'device': cy.device + ':' + prefs.compute_device_type,
                             'preparo_s': round(t1 - t0, 1), 'render_s': round(time.time() - t1, 1)}))

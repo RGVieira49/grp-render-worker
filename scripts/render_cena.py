@@ -1044,6 +1044,8 @@ if EXTERNO:
     luz['spots'] = 0      # de dia, de fora, as luminárias apagadas não aparecem
     if 'ceu_forca' not in cfg and luz['forca'] > 0:
         luz['ceu'] *= 0.1  # dia de sol: o sol manda; com o céu de interior a sombra ficava clara e a fachada chapada
+    if 'elevacao' not in cfg.get('sol', {}) and cfg.get('luz', 'dia') == 'dia':
+        luz['elevacao'] = cfg.get('sol_elevacao_externa', 28)  # sombra mais comprida: volume na fachada (17/11)
     if 'azimute' not in cfg.get('sol', {}):
         # sol de trás da câmera, 40° de lado: a fachada enquadrada fica iluminada e as varandas ganham sombra
         rumo = math.degrees(math.atan2(_c['alvo_x'] - _c['x'], _c['alvo_y'] - _c['y']))
@@ -1687,11 +1689,13 @@ if ganhos != (1.0, 1.0, 1.0):
     ultimo = wb.outputs[2]
 # Perspectiva aérea: o que está longe ganha o véu da cor do horizonte (a foto real tem ar entre a câmera e o
 # prédio do fundo). Sem isso tudo fica nítido e saturado igual, perto e longe — cara de maquete.
-nevoa = cfg.get('neblina', (0.45 if ALTO else 0.22) if EXTERNO else 0.0)
+# 17/11: mais ar (0,30 do chão, 0,60 do alto, chegando ao máximo a 450 m) — a cidade do fundo recua e o prédio
+# destaca; com 0,22/0,45 a aérea saía nítida até o horizonte, sem profundidade.
+nevoa = cfg.get('neblina', (0.6 if ALTO else 0.3) if EXTERNO else 0.0)
 if nevoa > 0 and nevoa_cor is not None:
     sc.view_layers[0].use_pass_mist = True
-    w.mist_settings.start = cfg.get('neblina_inicio', 30.0)
-    w.mist_settings.depth = cfg.get('neblina_fim', 700.0 if ALTO else 900.0)
+    w.mist_settings.start = cfg.get('neblina_inicio', 25.0)
+    w.mist_settings.depth = cfg.get('neblina_fim', 450.0 if ALTO else 700.0)
     w.mist_settings.falloff = 'LINEAR'
     def _math(op):
         try:

@@ -1404,7 +1404,17 @@ if entorno and ENTORNO_REAL.get('feicoes'):
         if (('oeste' in LADOS_RUA and lx0 - RUA_R - raio <= px <= lx0 + 1 + raio) or ('leste' in LADOS_RUA and lx1 - 1 - raio <= px <= lx1 + RUA_R + raio) or
                 ('sul' in LADOS_RUA and ly0 - RUA_R - raio <= py <= ly0 + 1 + raio) or ('norte' in LADOS_RUA and ly1 - 1 - raio <= py <= ly1 + RUA_R + raio)):
             return False  # em cima da rua
-        return math.hypot(px - _c['x'], py - _c['y']) > raio + 4  # câmera nunca dentro de uma casa
+        if math.hypot(px - _c['x'], py - _c['y']) <= raio + 4:
+            return False  # câmera nunca dentro de uma casa
+        if not ALTO:
+            # do chão, nada entre a câmera e o prédio (a câmera do arquiteto pode estar no meio de um quarteirão
+            # de casas: a casa da frente tapava tudo). Do alto, o que está embaixo não tapa.
+            ax, ay = _c['x'], _c['y']
+            vx, vy = (lx0 + lx1) / 2 - ax, (ly0 + ly1) / 2 - ay
+            t_ = max(0.0, min(1.0, ((px - ax) * vx + (py - ay) * vy) / max(vx * vx + vy * vy, 1e-6)))
+            if t_ < 0.98 and math.hypot(px - ax - t_ * vx, py - ay - t_ * vy) < raio + 12:
+                return False
+        return True
 
     def _caixa(cx, cy, w_, d_, h_, mi, z0_=None, rot=0.0):
         z0_ = cota_entorno(cx, cy) if z0_ is None else z0_

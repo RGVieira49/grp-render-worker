@@ -768,6 +768,78 @@ for nome_rev, aj_rev in AJUSTES.items():
     me.materials.append(ma)
     aguas.append({'revestimento': nome_rev, 'cota': nivel, 'm2': round(sum(f.area for f in me.polygons), 1)})
 
+# Revestimento cerâmico com a textura chapada: plugins de paginação (Decortiles e afins) mandam a peça como cor
+# única (2000×560 px de um tom só) e o rejunte como geometria à parte, que nem sempre vem no .glb. A parede saía
+# lisa, com cara de vidro ou água. Pelo tamanho no nome ("7x25cm") entram as peças: rejunte de 2 mm, tom de
+# cada peça ±4% e o brilho do esmalte. A cor continua a do arquiteto.
+pecas_ceramicas = []
+for m in bpy.data.materials:
+    if not m.use_nodes or classe_de(m.name) != 'ceramica' or not cfg.get('pecas_ceramicas', True):
+        continue
+    tam = re.search(r'(\d+(?:[.,]\d+)?)\s*x\s*(\d+(?:[.,]\d+)?)\s*cm', m.name, re.I)
+    if not tam:
+        continue
+    nt = m.node_tree
+    pr = next((n for n in nt.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+    if not pr:
+        continue
+    cor = list(pr.inputs['Base Color'].default_value[:3])
+    if pr.inputs['Base Color'].is_linked:
+        tx = pr.inputs['Base Color'].links[0].from_node
+        if tx.type != 'TEX_IMAGE' or not tx.image or not tx.image.size[0]:
+            continue
+        _px = np.empty(tx.image.size[0] * tx.image.size[1] * 4, np.float32)
+        tx.image.pixels.foreach_get(_px)
+        _px = _px.reshape(-1, 4)[::97, :3]
+        if float(_px.std(0).max()) > 0.02:  # a textura já desenha as peças
+            continue
+        cor = [float(v) for v in _px.mean(0)]
+        cor = [((c + 0.055) / 1.055) ** 2.4 if c > 0.04045 else c / 12.92 for c in cor]  # sRGB → linear
+    a_, b_ = (float(v.replace(',', '.')) / 100 for v in tam.groups())
+    larg, alt = max(a_, b_), min(a_, b_)  # peça deitada (assentamento horizontal, o mais comum)
+    geo = nt.nodes.new('ShaderNodeNewGeometry')
+    # coordenada na parede: horizontal ao longo dela e altura; no plano (bancada, topo) usa x e y
+    cruz = nt.nodes.new('ShaderNodeVectorMath'); cruz.operation = 'CROSS_PRODUCT'
+    nt.links.new(geo.outputs['Normal'], cruz.inputs[0]); cruz.inputs[1].default_value = (0, 0, 1)
+    tg = nt.nodes.new('ShaderNodeVectorMath'); tg.operation = 'NORMALIZE'
+    nt.links.new(cruz.outputs['Vector'], tg.inputs[0])
+    h = nt.nodes.new('ShaderNodeVectorMath'); h.operation = 'DOT_PRODUCT'
+    nt.links.new(geo.outputs['Position'], h.inputs[0]); nt.links.new(tg.outputs['Vector'], h.inputs[1])
+    sp = nt.nodes.new('ShaderNodeSeparateXYZ'); nt.links.new(geo.outputs['Position'], sp.inputs['Vector'])
+    sn = nt.nodes.new('ShaderNodeSeparateXYZ'); nt.links.new(geo.outputs['Normal'], sn.inputs['Vector'])
+    deitado = nt.nodes.new('ShaderNodeMath'); deitado.operation = 'GREATER_THAN'; deitado.inputs[1].default_value = 0.7
+    absz = nt.nodes.new('ShaderNodeMath'); absz.operation = 'ABSOLUTE'
+    nt.links.new(sn.outputs['Z'], absz.inputs[0]); nt.links.new(absz.outputs[0], deitado.inputs[0])
+    cu = nt.nodes.new('ShaderNodeMix'); cu.data_type = 'FLOAT'
+    nt.links.new(deitado.outputs[0], cu.inputs['Factor']); nt.links.new(h.outputs['Value'], cu.inputs[2]); nt.links.new(sp.outputs['X'], cu.inputs[3])
+    cv = nt.nodes.new('ShaderNodeMix'); cv.data_type = 'FLOAT'
+    nt.links.new(deitado.outputs[0], cv.inputs['Factor']); nt.links.new(sp.outputs['Z'], cv.inputs[2]); nt.links.new(sp.outputs['Y'], cv.inputs[3])
+    uv = nt.nodes.new('ShaderNodeCombineXYZ')
+    nt.links.new(cu.outputs[0], uv.inputs['X']); nt.links.new(cv.outputs[0], uv.inputs['Y'])
+    br = nt.nodes.new('ShaderNodeTexBrick')
+    br.offset = 0.5; br.offset_frequency = 2; br.squash = 1.0; br.squash_frequency = 2
+    br.inputs['Scale'].default_value = 1.0
+    br.inputs['Brick Width'].default_value = larg; br.inputs['Row Height'].default_value = alt
+    br.inputs['Mortar Size'].default_value = cfg.get('rejunte_m', 0.002)
+    br.inputs['Mortar Smooth'].default_value = 0.3
+    br.inputs['Bias'].default_value = 0.0
+    br.inputs['Color1'].default_value = (*[c * 0.96 for c in cor], 1)
+    br.inputs['Color2'].default_value = (*[min(1, c * 1.04) for c in cor], 1)
+    br.inputs['Mortar'].default_value = (0.62, 0.62, 0.6, 1)
+    nt.links.new(uv.outputs['Vector'], br.inputs['Vector'])
+    if pr.inputs['Base Color'].is_linked:
+        nt.links.remove(pr.inputs['Base Color'].links[0])
+    nt.links.new(br.outputs['Color'], pr.inputs['Base Color'])
+    rel = nt.nodes.new('ShaderNodeBump'); rel.invert = True
+    rel.inputs['Strength'].default_value = 0.5; rel.inputs['Distance'].default_value = 0.002
+    nt.links.new(br.outputs['Fac'], rel.inputs['Height'])
+    if pr.inputs['Normal'].is_linked:
+        nt.links.new(pr.inputs['Normal'].links[0].from_socket, rel.inputs['Normal'])
+    nt.links.new(rel.outputs['Normal'], pr.inputs['Normal'])
+    if not pr.inputs['Roughness'].is_linked:
+        pr.inputs['Roughness'].default_value = cfg.get('esmalte_rugosidade', 0.12)
+    pecas_ceramicas.append(m.name)
+
 # Quinas e cantos (o que mais denuncia "CG" numa fachada, segundo o archviz profissional):
 # - quina perfeita não existe: o Bevel arredonda a normal em ~6 mm e a aresta pega um fio de luz;
 # - canto e encontro de planos juntam poeira e recebem menos luz: a oclusão local escurece um pouco a cor ali.
@@ -775,6 +847,7 @@ QUINAS = cfg.get('quinas', 0.006 if EXTERNO else 0.0)  # testado no Mac 12/11: f
 SUJEIRA = cfg.get('sujeira', 0.22 if EXTERNO else 0.0)
 MACRO = cfg.get('variacao_tom', 0.04 if EXTERNO else 0.0)
 JANELAS = cfg.get('janelas_vivas', 1.0 if EXTERNO else 0.0)
+Z_JANELA = (z_chao if cotas else -1e9) + cfg.get('janelas_acima_do_chao', 6.0)  # térreo e garagem ficam de fora
 quinas_aplicadas = 0
 if QUINAS > 0 or SUJEIRA > 0 or MACRO > 0 or JANELAS > 0:
     for m in bpy.data.materials:
@@ -860,7 +933,11 @@ if QUINAS > 0 or SUJEIRA > 0 or MACRO > 0 or JANELAS > 0:
                     return n_.outputs[0]
                 pelo_vidro = _m('MULTIPLY', _m('GREATER_THAN', lp.outputs['Transmission Depth'], 0.5),
                                 _m('MULTIPLY', _m('LESS_THAN', lp.outputs['Diffuse Depth'], 0.5), _m('LESS_THAN', lp.outputs['Glossy Depth'], 0.5)))
-                forca = _m('MULTIPLY', fechado.outputs['Result'], pelo_vidro)
+                # só do 1º andar de apartamentos para cima: no térreo, pelo guarda-corpo de vidro da rampa, a
+                # parede da garagem (fechada) ganhava as células de "janela" (triângulos claros na rampa)
+                pos_j = nt.nodes.new('ShaderNodeNewGeometry'); sep_j = nt.nodes.new('ShaderNodeSeparateXYZ')
+                nt.links.new(pos_j.outputs['Position'], sep_j.inputs['Vector'])
+                forca = _m('MULTIPLY', _m('MULTIPLY', fechado.outputs['Result'], pelo_vidro), _m('GREATER_THAN', sep_j.outputs['Z'], Z_JANELA))
                 geo2 = nt.nodes.new('ShaderNodeNewGeometry')
                 vor2 = nt.nodes.new('ShaderNodeTexVoronoi')
                 vor2.inputs['Scale'].default_value = 0.5
@@ -926,7 +1003,13 @@ if JANELAS > 0 and EXTERNO:
         cor3.inputs[7].default_value = (0.27 * JANELAS, 0.26 * JANELAS, 0.24 * JANELAS, 1)
         em3 = nt.nodes.new('ShaderNodeEmission'); nt.links.new(cor3.outputs[2], em3.inputs['Color'])
         mx3 = nt.nodes.new('ShaderNodeMixShader')
-        nt.links.new(mt5.outputs[0], mx3.inputs['Fac'])
+        pos3 = nt.nodes.new('ShaderNodeNewGeometry'); sep3z = nt.nodes.new('ShaderNodeSeparateXYZ')
+        nt.links.new(pos3.outputs['Position'], sep3z.inputs['Vector'])
+        alto3 = nt.nodes.new('ShaderNodeMath'); alto3.operation = 'GREATER_THAN'; alto3.inputs[1].default_value = Z_JANELA
+        nt.links.new(sep3z.outputs['Z'], alto3.inputs[0])
+        mt6 = nt.nodes.new('ShaderNodeMath'); mt6.operation = 'MULTIPLY'
+        nt.links.new(mt5.outputs[0], mt6.inputs[0]); nt.links.new(alto3.outputs[0], mt6.inputs[1])
+        nt.links.new(mt6.outputs[0], mx3.inputs['Fac'])
         nt.links.new(saida_m.inputs['Surface'].links[0].from_socket, mx3.inputs[1])
         nt.links.new(em3.outputs['Emission'], mx3.inputs[2])
         nt.links.new(mx3.outputs['Shader'], saida_m.inputs['Surface'])
@@ -1685,7 +1768,7 @@ print('RESUMO', json.dumps({'materiais': contagem, 'suavizadas': suavizadas, 'fi
                             'pisos_polidos': pisos_polidos, 'pisos_foscos': pisos_foscos, 'spots': spots, 'piso_z': round(z0, 3),
                             'cor': sc.view_settings.view_transform, 'exposicao': round(expo, 2),
                             'balanco': [round(g, 3) for g in ganhos], 'fotometro': medida, 'luz': cfg.get('luz', 'dia'),
-                            'externo': EXTERNO, 'entorno': entorno, 'bairro': bairro, 'quinas': quinas_aplicadas, 'fundos_de_comodo': fundos_de_comodo, 'fora_do_lote': FORA_DO_LOTE, 'lote': [round(v, 1) for v in LOTE] if LOTE else None, 'rua_entorno': bool(ENTORNO_RUA), 'look': sc.view_settings.look, 'transformacao': sc.view_settings.view_transform, 'aguas': aguas, 'folhas': folhas, 'duplicadas': duplicadas, 'alfas_removidos': alfas_removidos, 'recuadas': recuadas, 'faces_duplas': faces_duplas, 'vidros_externos': vidros_externos, 'neblina': nevoa if nevoa_cor is not None else 0, 'alto': ALTO, 'ceu_visto': round(CEU_VISTO, 2), 'sol_azimute': round(luz['azimute'], 1),
+                            'externo': EXTERNO, 'entorno': entorno, 'bairro': bairro, 'quinas': quinas_aplicadas, 'fundos_de_comodo': fundos_de_comodo, 'pecas_ceramicas': pecas_ceramicas, 'fora_do_lote': FORA_DO_LOTE, 'lote': [round(v, 1) for v in LOTE] if LOTE else None, 'rua_entorno': bool(ENTORNO_RUA), 'look': sc.view_settings.look, 'transformacao': sc.view_settings.view_transform, 'aguas': aguas, 'folhas': folhas, 'duplicadas': duplicadas, 'alfas_removidos': alfas_removidos, 'recuadas': recuadas, 'faces_duplas': faces_duplas, 'vidros_externos': vidros_externos, 'neblina': nevoa if nevoa_cor is not None else 0, 'alto': ALTO, 'ceu_visto': round(CEU_VISTO, 2), 'sol_azimute': round(luz['azimute'], 1),
                             'ceu_forca': ceu_forca and round(ceu_forca, 3),
                             'device': cy.device + ':' + prefs.compute_device_type,
                             'preparo_s': round(t1 - t0, 1), 'render_s': round(time.time() - t1, 1)}))

@@ -1111,6 +1111,24 @@ def _cota_rua_lote():
 
 
 ENTORNO_RUA = None
+# Entorno real (traçado de uma foto de satélite, convertido para o modelo): torre vizinha, terrenos vazios,
+# casas, galpões e árvores onde estão de verdade. "ruas" diz em que lados do lote existe rua.
+ENTORNO_REAL = cfg.get('entorno_real') or {}
+LADOS_RUA = set(ENTORNO_REAL.get('ruas', ['oeste', 'leste', 'sul', 'norte']))
+
+
+def dentro_poligono(px, py, pol):
+    """Ponto dentro do polígono [[x, y], ...] (regra do raio)."""
+    dentro, n = False, len(pol)
+    for k in range(n):
+        x1, y1 = pol[k]; x2, y2 = pol[(k + 1) % n]
+        if (y1 > py) != (y2 > py) and px < (x2 - x1) * (py - y1) / ((y2 - y1) or 1e-12) + x1:
+            dentro = not dentro
+    return dentro
+
+
+CAMPOS = [f_['poligono'] for f_ in ENTORNO_REAL.get('feicoes', []) if f_.get('tipo') == 'campo' and f_.get('poligono')]
+COBERTURA = ENTORNO_REAL.get('cobertura')
 if EXTERNO and LOTE and cfg.get('entorno', ALTO or FORA_DO_LOTE):
     ENTORNO_RUA = _cota_rua_lote()
 
@@ -1174,15 +1192,24 @@ if EXTERNO and cotas and cfg.get('entorno', ALTO or FORA_DO_LOTE):
             for j in range(len(ys) - 1):
                 x, y = (xs[i] + xs[i + 1]) / 2, (ys[j] + ys[j + 1]) / 2
                 if lx0 + 1 < x < lx1 - 1 and ly0 + 1 < y < ly1 - 1:
+                    # dentro do retângulo do lote: só onde o modelo não tem nada (o recorte de um lote em L ficava
+                    # um buraco até o plano de longe — a mancha clara lisa no meio da aérea)
+                    if sc.ray_cast(_dg, Vector((x, y, 300.0)), Vector((0, 0, -1)))[0]:
+                        continue
+                    f = _bm.faces.new((V[i][j], V[i + 1][j], V[i + 1][j + 1], V[i][j + 1]))
+                    f.material_index = 2
                     continue
                 f = _bm.faces.new((V[i][j], V[i + 1][j], V[i + 1][j + 1], V[i][j + 1]))
                 dx, dy = _faixa(x, lx0, lx1), _faixa(y, ly0, ly1)
                 # rua: até RUA metros fora da borda do lote, e as mesmas faixas seguindo depois das esquinas
-                rua = (dx <= RUA and dy <= RUA) or (lx0 - RUA <= x <= lx0 + 1 or lx1 - 1 <= x <= lx1 + RUA) or (ly0 - RUA <= y <= ly0 + 1 or ly1 - 1 <= y <= ly1 + RUA)
-                calc = not rua and ((dx <= RUA + CALC and dy <= RUA + CALC) or (lx0 - RUA - CALC <= x <= lx1 + RUA + CALC and dy <= RUA + CALC) or
-                                    (ly0 - RUA - CALC <= y <= ly1 + RUA + CALC and dx <= RUA + CALC) or
-                                    min(abs(x - (lx0 - RUA)), abs(x - (lx1 + RUA)), abs(y - (ly0 - RUA)), abs(y - (ly1 + RUA))) <= CALC)
-                f.material_index = 0 if rua else (1 if calc else 2)
+                # só nos lados que têm rua de verdade (o resto do contorno é calçada e o vizinho)
+                def _faixas(m):
+                    return (('oeste' in LADOS_RUA and lx0 - RUA - m <= x <= lx0 + 1) or ('leste' in LADOS_RUA and lx1 - 1 <= x <= lx1 + RUA + m) or
+                            ('sul' in LADOS_RUA and ly0 - RUA - m <= y <= ly0 + 1) or ('norte' in LADOS_RUA and ly1 - 1 <= y <= ly1 + RUA + m))
+                rua = _faixas(0)
+                calc = not rua and (_faixas(CALC) or (dx <= CALC and dy <= CALC))
+                campo = not rua and not calc and any(dentro_poligono(x, y, pol) for pol in CAMPOS)
+                f.material_index = 0 if rua else (1 if calc else (3 if campo else 2))
         # longe (depois da malha): um plano por lado, na cota da borda daquele lado (sem degrau grande)
         _r = cfg.get('entorno_raio', 3000.0)
         for (a0, a1, b0, b1), zl in (((-_r, _r, -_r, ys[0]), Z[:, 0].min()), ((-_r, _r, ys[-1], _r), Z[:, -1].min()),
@@ -1195,7 +1222,10 @@ if EXTERNO and cotas and cfg.get('entorno', ALTO or FORA_DO_LOTE):
         _vs = [_bm.verts.new((_c['x'] + dx * _r, _c['y'] + dy * _r, _zmin)) for dx, dy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
         _bm.faces.new(_vs).material_index = 2
     _me = bpy.data.meshes.new('entorno'); _bm.to_mesh(_me); _bm.free()
-    for _mm in (_m_asf, _m_calc, _m_quadra):
+    # terreno vazio de verdade: capim alto, verde com manchas secas (como na foto de satélite)
+    _m_campo = _mat_chao('entorno_campo', None, 0.95, 0.12, 0, cores_ramp=[
+        (0.06, 0.09, 0.035), (0.45, (0.085, 0.11, 0.045)), (0.7, (0.16, 0.15, 0.08)), (0.2, 0.17, 0.1)])
+    for _mm in (_m_asf, _m_calc, _m_quadra, _m_campo):
         _me.materials.append(_mm)
     _ob = bpy.data.objects.new('entorno', _me); sc.collection.objects.link(_ob)
     entorno = True
@@ -1254,8 +1284,11 @@ if entorno and cfg.get('bairro', True):
         if ENTORNO_RUA:
             lx0, lx1, ly0, ly1 = LOTE
             faixa = cfg.get('rua_largura_extra', 8.0) + 3.0 + raio
-            if lx0 - faixa <= px <= lx0 + 1 + raio or lx1 - 1 - raio <= px <= lx1 + faixa or ly0 - faixa <= py <= ly0 + 1 + raio or ly1 - 1 - raio <= py <= ly1 + faixa:
+            if (('oeste' in LADOS_RUA and lx0 - faixa <= px <= lx0 + 1 + raio) or ('leste' in LADOS_RUA and lx1 - 1 - raio <= px <= lx1 + faixa) or
+                    ('sul' in LADOS_RUA and ly0 - faixa <= py <= ly0 + 1 + raio) or ('norte' in LADOS_RUA and ly1 - 1 - raio <= py <= ly1 + faixa)):
                 return False
+        if COBERTURA and dentro_poligono(px, py, COBERTURA):
+            return False  # dentro da área da foto de satélite vale o entorno real
         if math.hypot(px - _c['x'], py - _c['y']) < raio + 15:
             return False
         if not ALTO:  # do chão, a casa no caminho tapa o prédio; do alto, fica embaixo
@@ -1307,10 +1340,172 @@ if entorno and cfg.get('bairro', True):
             continue
         for f in {f for v in res['verts'] for f in v.link_faces}:
             f.material_index = 5
+            f.smooth = True  # copa lisa: com sombreamento facetado as árvores pareciam de papel dobrado
     meb = bpy.data.meshes.new('bairro'); bmb.to_mesh(meb); bmb.free()
     for mb in mats_b:
         meb.materials.append(mb)
     sc.collection.objects.link(bpy.data.objects.new('bairro', meb))
+# Entorno real: o que existe em volta do terreno (foto de satélite traçada e convertida para o modelo).
+# Volumes simples, na cota do chão de fora, com cor e telhado de cada tipo: de longe e na névoa leem como o
+# bairro de verdade; a IA do acabamento troca por foto. Nada aqui encosta no projeto do arquiteto.
+entorno_real = {}
+if entorno and ENTORNO_REAL.get('feicoes'):
+    from mathutils import Matrix
+    rng_r = np.random.default_rng(cfg.get('entorno_real_semente', 11))
+
+    def _mat_simples(nome, cor, rug=0.85, janelas=False):
+        mb = bpy.data.materials.new(nome); mb.use_nodes = True
+        ntb = mb.node_tree; pb = next(n for n in ntb.nodes if n.type == 'BSDF_PRINCIPLED')
+        pb.inputs['Roughness'].default_value = rug
+        if not janelas:
+            nz = ntb.nodes.new('ShaderNodeTexNoise'); nz.inputs['Scale'].default_value = 0.6; nz.inputs['Detail'].default_value = 6
+            tc = ntb.nodes.new('ShaderNodeTexCoord'); ntb.links.new(tc.outputs['Object'], nz.inputs['Vector'])
+            rp = ntb.nodes.new('ShaderNodeValToRGB')
+            rp.color_ramp.elements[0].color = (*[c * 0.88 for c in cor], 1); rp.color_ramp.elements[-1].color = (*[min(1, c * 1.08) for c in cor], 1)
+            ntb.links.new(nz.outputs['Fac'], rp.inputs['Fac']); ntb.links.new(rp.outputs['Color'], pb.inputs['Base Color'])
+            return mb
+        # fachada com janelas: faixas de vidro escuro por andar (3 m) e vãos de 1,4 m
+        gb = ntb.nodes.new('ShaderNodeNewGeometry'); sb = ntb.nodes.new('ShaderNodeSeparateXYZ')
+        ntb.links.new(gb.outputs['Position'], sb.inputs['Vector'])
+        ab = ntb.nodes.new('ShaderNodeMath'); ab.operation = 'ADD'
+        ntb.links.new(sb.outputs['X'], ab.inputs[0]); ntb.links.new(sb.outputs['Y'], ab.inputs[1])
+        cb = ntb.nodes.new('ShaderNodeCombineXYZ')
+        ntb.links.new(ab.outputs[0], cb.inputs['X']); ntb.links.new(sb.outputs['Z'], cb.inputs['Y'])
+        br = ntb.nodes.new('ShaderNodeTexBrick'); br.offset = 0.0; br.squash = 1.0
+        br.inputs['Scale'].default_value = 1.0; br.inputs['Brick Width'].default_value = 1.6; br.inputs['Row Height'].default_value = 3.0
+        br.inputs['Mortar Size'].default_value = 0.55
+        br.inputs['Color1'].default_value = (0.06, 0.07, 0.08, 1); br.inputs['Color2'].default_value = (0.1, 0.11, 0.12, 1)
+        br.inputs['Mortar'].default_value = (*cor, 1)
+        ntb.links.new(cb.outputs['Vector'], br.inputs['Vector']); ntb.links.new(br.outputs['Color'], pb.inputs['Base Color'])
+        return mb
+    M_R = [_mat_simples('real_parede_clara', (0.72, 0.7, 0.66)), _mat_simples('real_parede_bege', (0.66, 0.6, 0.5)),
+           _mat_simples('real_parede_cinza', (0.55, 0.55, 0.53)), _mat_simples('real_telha_ceramica', (0.42, 0.24, 0.16), 0.75),
+           _mat_simples('real_telha_cinza', (0.45, 0.45, 0.44), 0.7), _mat_simples('real_telha_metal', (0.7, 0.71, 0.72), 0.45),
+           _mat_simples('real_predio', (0.74, 0.73, 0.7), 0.6, janelas=True), _mat_simples('real_laje', (0.5, 0.48, 0.45))]
+    mf = bpy.data.materials.new('real_folhas'); mf.use_nodes = True
+    ntf = mf.node_tree; pf = next(n for n in ntf.nodes if n.type == 'BSDF_PRINCIPLED'); pf.inputs['Roughness'].default_value = 0.8
+    nzf = ntf.nodes.new('ShaderNodeTexNoise'); nzf.inputs['Scale'].default_value = 2.5; nzf.inputs['Detail'].default_value = 8
+    tcf = ntf.nodes.new('ShaderNodeTexCoord'); ntf.links.new(tcf.outputs['Object'], nzf.inputs['Vector'])
+    rpf = ntf.nodes.new('ShaderNodeValToRGB')
+    rpf.color_ramp.elements[0].color = (0.025, 0.045, 0.018, 1); rpf.color_ramp.elements.new(0.5).color = (0.05, 0.085, 0.03, 1)
+    rpf.color_ramp.elements[-1].color = (0.1, 0.13, 0.05, 1)
+    ntf.links.new(nzf.outputs['Fac'], rpf.inputs['Fac']); ntf.links.new(rpf.outputs['Color'], pf.inputs['Base Color'])
+    bump_f = ntf.nodes.new('ShaderNodeBump'); bump_f.inputs['Strength'].default_value = 0.6
+    ntf.links.new(nzf.outputs['Fac'], bump_f.inputs['Height']); ntf.links.new(bump_f.outputs['Normal'], pf.inputs['Normal'])
+    mtr = _mat_simples('real_tronco', (0.18, 0.13, 0.09))
+    M_R += [mf, mtr]  # 8 folhas, 9 tronco
+    bmr = bmesh.new()
+    lx0, lx1, ly0, ly1 = LOTE
+    RUA_R = cfg.get('rua_largura_extra', 8.0)
+
+    def _pode(px, py, raio, no_lote=False):
+        if not no_lote and lx0 - 1 < px < lx1 + 1 and ly0 - 1 < py < ly1 + 1:
+            return False  # o lote é do arquiteto
+        if (('oeste' in LADOS_RUA and lx0 - RUA_R - raio <= px <= lx0 + 1 + raio) or ('leste' in LADOS_RUA and lx1 - 1 - raio <= px <= lx1 + RUA_R + raio) or
+                ('sul' in LADOS_RUA and ly0 - RUA_R - raio <= py <= ly0 + 1 + raio) or ('norte' in LADOS_RUA and ly1 - 1 - raio <= py <= ly1 + RUA_R + raio)):
+            return False  # em cima da rua
+        return math.hypot(px - _c['x'], py - _c['y']) > raio + 4  # câmera nunca dentro de uma casa
+
+    def _caixa(cx, cy, w_, d_, h_, mi, z0_=None, rot=0.0):
+        z0_ = cota_entorno(cx, cy) if z0_ is None else z0_
+        M = Matrix.Translation((cx, cy, z0_ - 0.3 + (h_ + 0.3) / 2)) @ Matrix.Rotation(rot, 4, 'Z') @ Matrix.Diagonal((w_, d_, h_ + 0.3, 1))
+        res = bmesh.ops.create_cube(bmr, size=1.0, matrix=M)
+        for f in {f for v in res['verts'] for f in v.link_faces}:
+            f.material_index = mi
+        return z0_ + h_
+
+    def _telhado(cx, cy, w_, d_, z_, mi, rot=0.0):
+        hr = min(w_, d_) * 0.22
+        res = bmesh.ops.create_cone(bmr, cap_ends=True, cap_tris=False, segments=4, radius1=0.7071, radius2=0.0, depth=1.0,
+                                    matrix=Matrix.Translation((cx, cy, z_ + hr / 2)) @ Matrix.Rotation(rot, 4, 'Z') @ Matrix.Diagonal((w_ * 1.08, d_ * 1.08, hr, 1)) @ Matrix.Rotation(math.pi / 4, 4, 'Z'))
+        for f in {f for v in res['verts'] for f in v.link_faces}:
+            f.material_index = mi
+
+    def _arvore(px, py, r):
+        z0_ = cota_entorno(px, py)
+        res = bmesh.ops.create_cone(bmr, cap_ends=True, segments=8, radius1=r * 0.06, radius2=r * 0.04, depth=2.6,
+                                    matrix=Matrix.Translation((px, py, z0_ + 1.3)))
+        for f in {f for v in res['verts'] for f in v.link_faces}:
+            f.material_index = 9
+        # copa de 3 a 5 volumes sobrepostos, lisos, com relevo: lê como folhagem e não como bola
+        for _k in range(int(rng_r.integers(3, 6))):
+            rr = r * rng_r.uniform(0.55, 0.8)
+            ox, oy, oz = rng_r.normal(0, r * 0.3), rng_r.normal(0, r * 0.3), rng_r.uniform(0.2, 0.6) * r
+            res = bmesh.ops.create_icosphere(bmr, subdivisions=3, radius=rr,
+                                             matrix=Matrix.Translation((px + ox, py + oy, z0_ + 2.4 + r * 0.55 + oz)) @ Matrix.Diagonal((1, 1, rng_r.uniform(0.7, 0.9), 1)))
+            for v_ in res['verts']:
+                v_.co += v_.normal * float(rng_r.normal(0, rr * 0.06))
+            for f in {f for v in res['verts'] for f in v.link_faces}:
+                f.material_index = 8; f.smooth = True
+
+    def _pontos_da_linha(linha, espaco):
+        pts = []
+        for (x1, y1), (x2, y2) in zip(linha[:-1], linha[1:]):
+            n = max(1, int(math.hypot(x2 - x1, y2 - y1) / espaco))
+            pts += [(x1 + (x2 - x1) * k / n, y1 + (y2 - y1) * k / n) for k in range(n)]
+        return pts + [tuple(linha[-1])]
+
+    for fe in ENTORNO_REAL['feicoes']:
+        tipo, pol = fe.get('tipo'), fe.get('poligono')
+        no_lote = bool(fe.get('dentro_do_lote'))
+        n0 = sum(entorno_real.values())
+        if tipo in ('predio', 'bloco') and pol:
+            xs_, ys_ = [p_[0] for p_ in pol], [p_[1] for p_ in pol]
+            cx, cy = sum(xs_) / len(xs_), sum(ys_) / len(ys_)
+            if not _pode(cx, cy, 0, no_lote):
+                continue
+            z0_ = min(cota_entorno(x, y) for x, y in pol)
+            vs = [bmr.verts.new((x, y, z0_ - 0.3)) for x, y in pol]
+            fb = bmr.faces.new(vs)
+            if fb.normal.z < 0:
+                fb.normal_flip()
+            ext = bmesh.ops.extrude_face_region(bmr, geom=[fb])
+            topo = [v for v in ext['geom'] if isinstance(v, bmesh.types.BMVert)]
+            for v in topo:
+                v.co.z = z0_ + float(fe.get('altura', 6))
+            mi = 6 if tipo == 'predio' else 7
+            for f in {f for v in topo for f in v.link_faces} | {fb}:
+                f.material_index = mi
+            entorno_real[tipo] = entorno_real.get(tipo, 0) + 1
+        elif tipo in ('casas', 'galpoes') and pol:
+            lw, ld = fe.get('lote', [12, 20] if tipo == 'casas' else [30, 40])
+            xs_, ys_ = [p_[0] for p_ in pol], [p_[1] for p_ in pol]
+            for gx in np.arange(min(xs_) + lw / 2, max(xs_), lw):
+                for gy in np.arange(min(ys_) + ld / 2, max(ys_), ld):
+                    if not dentro_poligono(gx, gy, pol):
+                        continue
+                    jx, jy = rng_r.normal(0, lw * 0.06), rng_r.normal(0, ld * 0.06)
+                    w_, d_ = lw * rng_r.uniform(0.6, 0.82), ld * rng_r.uniform(0.5, 0.75)
+                    vazio = rng_r.random() < (0.12 if tipo == 'casas' else 0.3)  # lote vago / pátio
+                    andares = int(rng_r.choice(fe.get('andares', [1]))) if tipo == 'casas' else 1
+                    parede, telha = int(rng_r.integers(0, 3)), (3 if rng_r.random() < 0.6 else 4)
+                    if vazio or not _pode(gx + jx, gy + jy, max(w_, d_) / 2, no_lote):
+                        continue
+                    if tipo == 'casas':
+                        z_ = _caixa(gx + jx, gy + jy, w_, d_, 3.0 * andares, parede)
+                        _telhado(gx + jx, gy + jy, w_, d_, z_, telha)
+                    else:
+                        _caixa(gx + jx, gy + jy, w_, d_, float(fe.get('altura', 8)), 2)
+                        _telhado(gx + jx, gy + jy, w_, d_, cota_entorno(gx + jx, gy + jy) + float(fe.get('altura', 8)), 5)
+                    entorno_real[tipo] = entorno_real.get(tipo, 0) + 1
+        elif tipo == 'arvores':
+            pts = fe.get('pontos') or (_pontos_da_linha(fe['linha'], fe.get('espaco', 8)) if fe.get('linha') else [])
+            r0, r1 = fe.get('raio', [3.5, 5.5])
+            for px, py in pts:
+                px, py = px + rng_r.normal(0, 1.0), py + rng_r.normal(0, 1.0)
+                r = rng_r.uniform(r0, r1)
+                if not _pode(px, py, 0.0):
+                    continue  # na calçada pode; no asfalto e dentro do lote, não
+                if math.hypot(px - _c['x'], py - _c['y']) < r + 3:
+                    continue
+                _arvore(px, py, r)
+                entorno_real['arvores'] = entorno_real.get('arvores', 0) + 1
+    if bmr.verts:
+        mer = bpy.data.meshes.new('entorno_real'); bmr.to_mesh(mer)
+        for mm in M_R:
+            mer.materials.append(mm)
+        sc.collection.objects.link(bpy.data.objects.new('entorno_real', mer))
+    bmr.free()
 if ALTO and cfg.get('ceu_foto_alto'):
     cfg['ceu_foto'] = cfg['ceu_foto_alto']
 w = bpy.data.worlds.new('ceu') if not sc.world else sc.world
@@ -1772,7 +1967,7 @@ print('RESUMO', json.dumps({'materiais': contagem, 'suavizadas': suavizadas, 'fi
                             'pisos_polidos': pisos_polidos, 'pisos_foscos': pisos_foscos, 'spots': spots, 'piso_z': round(z0, 3),
                             'cor': sc.view_settings.view_transform, 'exposicao': round(expo, 2),
                             'balanco': [round(g, 3) for g in ganhos], 'fotometro': medida, 'luz': cfg.get('luz', 'dia'),
-                            'externo': EXTERNO, 'entorno': entorno, 'bairro': bairro, 'quinas': quinas_aplicadas, 'fundos_de_comodo': fundos_de_comodo, 'pecas_ceramicas': pecas_ceramicas, 'fora_do_lote': FORA_DO_LOTE, 'lote': [round(v, 1) for v in LOTE] if LOTE else None, 'rua_entorno': bool(ENTORNO_RUA), 'look': sc.view_settings.look, 'transformacao': sc.view_settings.view_transform, 'aguas': aguas, 'folhas': folhas, 'duplicadas': duplicadas, 'alfas_removidos': alfas_removidos, 'recuadas': recuadas, 'faces_duplas': faces_duplas, 'vidros_externos': vidros_externos, 'neblina': nevoa if nevoa_cor is not None else 0, 'alto': ALTO, 'ceu_visto': round(CEU_VISTO, 2), 'sol_azimute': round(luz['azimute'], 1),
+                            'externo': EXTERNO, 'entorno': entorno, 'bairro': bairro, 'quinas': quinas_aplicadas, 'fundos_de_comodo': fundos_de_comodo, 'pecas_ceramicas': pecas_ceramicas, 'fora_do_lote': FORA_DO_LOTE, 'lote': [round(v, 1) for v in LOTE] if LOTE else None, 'rua_entorno': bool(ENTORNO_RUA), 'entorno_real': entorno_real, 'look': sc.view_settings.look, 'transformacao': sc.view_settings.view_transform, 'aguas': aguas, 'folhas': folhas, 'duplicadas': duplicadas, 'alfas_removidos': alfas_removidos, 'recuadas': recuadas, 'faces_duplas': faces_duplas, 'vidros_externos': vidros_externos, 'neblina': nevoa if nevoa_cor is not None else 0, 'alto': ALTO, 'ceu_visto': round(CEU_VISTO, 2), 'sol_azimute': round(luz['azimute'], 1),
                             'ceu_forca': ceu_forca and round(ceu_forca, 3),
                             'device': cy.device + ':' + prefs.compute_device_type,
                             'preparo_s': round(t1 - t0, 1), 'render_s': round(time.time() - t1, 1)}))

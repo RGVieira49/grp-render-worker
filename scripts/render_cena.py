@@ -402,9 +402,29 @@ def folhagem(m, nt, pr):
         return
     pr.inputs['Subsurface Weight'].default_value = 0.0
     pr.inputs['Coat Weight'].default_value = 0.0
-    pr.inputs['Specular IOR Level'].default_value = cfg.get('folha_especular', 0.35)
+    # 18/11: folha grande (costela-de-adão, bananeira) saía preta e encerada em 4K: brilho especular de
+    # plástico (0,35) e textura do SketchUp muito escura. Folha real é fosca-acetinada, com albedo ~0,1–0,2.
+    pr.inputs['Specular IOR Level'].default_value = cfg.get('folha_especular', 0.22)
     if not pr.inputs['Roughness'].is_linked:
-        pr.inputs['Roughness'].default_value = 0.55
+        pr.inputs['Roughness'].default_value = 0.68
+    else:
+        rmax = nt.nodes.new('ShaderNodeMath'); rmax.operation = 'MAXIMUM'
+        nt.links.new(pr.inputs['Roughness'].links[0].from_socket, rmax.inputs[0])
+        rmax.inputs[1].default_value = 0.6
+        nt.links.new(rmax.outputs['Value'], pr.inputs['Roughness'])
+    ganho_folha = 1.0
+    _tex = pr.inputs['Base Color'].links[0].from_node if pr.inputs['Base Color'].is_linked else None
+    try:
+        if _tex is not None and getattr(_tex, 'type', '') == 'TEX_IMAGE' and _tex.image:
+            _lum = float(media_linear(_tex.image) @ np.array([0.2126, 0.7152, 0.0722]))
+        else:
+            _c0 = pr.inputs['Base Color'].default_value
+            _lum = 0.2126 * _c0[0] + 0.7152 * _c0[1] + 0.0722 * _c0[2]
+        alvo_lum = cfg.get('folha_lum_min', 0.075)
+        if 0 < _lum < alvo_lum:
+            ganho_folha = min(alvo_lum / _lum, 2.6)  # sobe só as escuras; as claras ficam como o arquiteto pôs
+    except Exception:
+        pass
     # variação por touceira
     pos = nt.nodes.new('ShaderNodeNewGeometry')
     vor = nt.nodes.new('ShaderNodeTexVoronoi')
@@ -419,7 +439,7 @@ def folhagem(m, nt, pr):
     nt.links.new(faixa_h.outputs['Result'], hsv.inputs['Hue'])
     faixa_v = nt.nodes.new('ShaderNodeMapRange')
     escuro = cfg.get('folha_valor', 0.78)
-    faixa_v.inputs['To Min'].default_value, faixa_v.inputs['To Max'].default_value = escuro * 0.8, escuro * 1.15
+    faixa_v.inputs['To Min'].default_value, faixa_v.inputs['To Max'].default_value = escuro * 0.8 * ganho_folha, escuro * 1.15 * ganho_folha
     nt.links.new(sep.outputs[1], faixa_v.inputs['Value'])
     nt.links.new(faixa_v.outputs['Result'], hsv.inputs['Value'])
     hsv.inputs['Saturation'].default_value = cfg.get('folha_saturacao', 0.88)
@@ -438,7 +458,7 @@ def folhagem(m, nt, pr):
     tinta.inputs[7].default_value = (1.1, 1.15, 0.6, 1)
     nt.links.new(tinta.outputs[2], tr.inputs['Color'])
     mix = nt.nodes.new('ShaderNodeMixShader')
-    mix.inputs['Fac'].default_value = cfg.get('folha_translucida', 0.3)
+    mix.inputs['Fac'].default_value = cfg.get('folha_translucida', 0.38)
     nt.links.new(pr.outputs['BSDF'], mix.inputs[1])
     nt.links.new(tr.outputs['BSDF'], mix.inputs[2])
     final = mix.outputs['Shader']
@@ -681,6 +701,12 @@ if EXTERNO:
         pr.inputs['IOR'].default_value = cfg.get('vidro_ior_externo', 1.75)
         if not pr.inputs['Roughness'].is_linked:
             pr.inputs['Roughness'].default_value = 0.0
+        if not pr.inputs['Normal'].is_linked and cfg.get('vidro_normal_da_face', True):
+            # 18/11: painel de vidro saía com triângulos escuros (guarda-corpo da quadra, bloco do lazer): a
+            # normal vinha suavizada pelo SketchUp entre as faces do painel e o reflexo "quebrava" em cada
+            # triângulo. Vidro é plano: a normal verdadeira da face dá um reflexo único e contínuo.
+            gv = m.node_tree.nodes.new('ShaderNodeNewGeometry')
+            m.node_tree.links.new(gv.outputs['True Normal'], pr.inputs['Normal'])
         vidros_externos += 1
 
 # Ninguém tem superfície perfeitamente uniforme: uma variação leve na rugosidade tira o "ar de CG".
@@ -752,7 +778,7 @@ for nome_rev, aj_rev in AJUSTES.items():
     pr.inputs['Transmission Weight'].default_value = 1.0
     pr.inputs['IOR'].default_value = 1.333
     pr.inputs['Roughness'].default_value = 0.02
-    pr.inputs['Base Color'].default_value = (0.78, 0.93, 0.93, 1)  # um verde-água leve: o azul é do revestimento
+    pr.inputs['Base Color'].default_value = tuple(cfg.get('agua_cor', (0.88, 0.98, 0.97))) + (1,)  # verde-água leve: o azul é do revestimento (18/11: mais clara, de cima saía escura)
     # marola fina: quebra o espelho perfeito como na foto de piscina (sem isso parece vidro)
     coord = nt.nodes.new('ShaderNodeTexCoord')
     ruido = nt.nodes.new('ShaderNodeTexNoise')
@@ -887,6 +913,22 @@ if QUINAS > 0 or SUJEIRA > 0 or MACRO > 0 or JANELAS > 0:
             nt.links.new(cmb.outputs['Color'], mul.inputs[7])
             nt.links.new(mul.outputs[2], pr.inputs['Base Color'])
         cl_m = classe_de(m.name)
+        if EXTERNO and cfg.get('fosco_embaixo', True) and cl_m != 'metal':
+            # 18/11: a face de baixo de réguas, marquises e lajes refletia o chão ensolarado e saía com manchas
+            # de "nuvem" (pergolado da entrada em 4K). Tinta e concreto vistos de baixo são foscos.
+            gN = nt.nodes.new('ShaderNodeNewGeometry')
+            sN = nt.nodes.new('ShaderNodeSeparateXYZ'); nt.links.new(gN.outputs['Normal'], sN.inputs['Vector'])
+            baixo = nt.nodes.new('ShaderNodeMath'); baixo.operation = 'LESS_THAN'
+            nt.links.new(sN.outputs['Z'], baixo.inputs[0]); baixo.inputs[1].default_value = -0.5
+            alvo_r = nt.nodes.new('ShaderNodeMath'); alvo_r.operation = 'MULTIPLY'
+            nt.links.new(baixo.outputs['Value'], alvo_r.inputs[0]); alvo_r.inputs[1].default_value = 0.92
+            rmx = nt.nodes.new('ShaderNodeMath'); rmx.operation = 'MAXIMUM'
+            if pr.inputs['Roughness'].is_linked:
+                nt.links.new(pr.inputs['Roughness'].links[0].from_socket, rmx.inputs[0])
+            else:
+                rmx.inputs[0].default_value = pr.inputs['Roughness'].default_value
+            nt.links.new(alvo_r.outputs['Value'], rmx.inputs[1])
+            nt.links.new(rmx.outputs['Value'], pr.inputs['Roughness'])
         if MACRO > 0 and cl_m in ('pintura', 'textura_parede') and pr.inputs['Base Color'].is_linked:
             # parede real nunca tem cor perfeitamente uniforme: manchas largas (~12 m) de ±4% no tom
             geo = nt.nodes.new('ShaderNodeNewGeometry')
@@ -1303,9 +1345,10 @@ if entorno and cfg.get('bairro', True):
         if not _fora(px, py, 30):
             continue
         t = rng.random()
-        if r < 90:
-            t = min(t, 0.59)  # perto do terreno só casas (prédio vizinho colado vira paredão sem graça)
-        elif r < 200:
+        # 18/11: a região real é de casas; prédio inventado perto aparecia atrás das árvores como brinquedo
+        if r < cfg.get('bairro_so_casas_ate', 260):
+            t = min(t, 0.59)
+        elif r < cfg.get('bairro_sem_torres_ate', 420):
             t = min(t, 0.91)
         if t < 0.6:
             w_, d_, h_ = rng.uniform(8, 14), rng.uniform(10, 20), rng.uniform(3, 8)
@@ -1314,7 +1357,10 @@ if entorno and cfg.get('bairro', True):
         else:
             w_, d_, h_ = rng.uniform(16, 28), rng.uniform(16, 28), rng.uniform(30, 75)
         rot_ = rng.uniform(-0.08, 0.08)
-        mi = 4 if (t < 0.6 and rng.random() < 0.5) else int(rng.integers(0, 4))
+        _sorteio_cor = rng.random() if t < 0.6 else None
+        mi = int(rng.integers(0, 4))
+        if t < 0.6:
+            mi = 4  # casa: parede lisa (a grade de janelas é coisa de prédio)
         if not _livre(px, py, max(w_, d_) / 2):  # os sorteios acima já foram feitos: o bairro é o mesmo em toda vista
             continue
         z_base = cota_entorno(px, py) if ENTORNO_RUA else _zmin
@@ -1516,7 +1562,10 @@ if entorno and ENTORNO_REAL.get('feicoes'):
             mer.materials.append(mm)
         sc.collection.objects.link(bpy.data.objects.new('entorno_real', mer))
     bmr.free()
-if ALTO and cfg.get('ceu_foto_alto'):
+# 18/11: do chão, com entorno montado (lote + bairro), o fundo "jardim" (foto 4K esticada) aparecia como
+# árvores borradas em 4K. Vai o céu aberto; árvores e casas são o entorno 3D, e o longe some na névoa.
+CEU_ABERTO = bool(ALTO or (EXTERNO and LOTE and cfg.get('fundo_ceu_aberto', True)))
+if CEU_ABERTO and cfg.get('ceu_foto_alto'):
     cfg['ceu_foto'] = cfg['ceu_foto_alto']
 w = bpy.data.worlds.new('ceu') if not sc.world else sc.world
 sc.world = w
@@ -1554,7 +1603,7 @@ if cfg.get('ceu_foto'):
     bg_foto = wn.nodes.new('ShaderNodeBackground')
     bg_foto.inputs['Strength'].default_value = cfg.get('ceu_foto_forca', 0.8) * max(luz['ceu'], 0.5)
     cor_ceu = env.outputs['Color']
-    if ALTO:
+    if ALTO or (CEU_ABERTO and cfg.get('ceu_foto_alto') and cfg.get('ceu_foto') == cfg.get('ceu_foto_alto')):
         # A foto de céu aberto tem embaixo do horizonte um reflexo do próprio céu (parece mar). Lá do alto,
         # abaixo do horizonte vai uma névoa na cor do horizonte da foto, como a cidade vista de longe.
         _px = np.empty(env.image.size[0] * env.image.size[1] * 4, np.float32)
@@ -1856,7 +1905,15 @@ if EXTERNO and cfg.get('ceu_foto'):
     # só no que a câmera vê: nos reflexos o céu continua com a força de antes (senão a rua vira espelho de nuvem)
     bg_cam = wn.nodes.new('ShaderNodeBackground')
     bg_cam.inputs['Strength'].default_value = ceu_forca
-    wn.links.new(cor_ceu, bg_cam.inputs['Color'])
+    sat_cam = cfg.get('ceu_saturacao_foto', 0.78)
+    if sat_cam != 1.0:
+        # 18/11: o azul do céu saía escuro e saturado demais ao lado do branco do prédio (praça leste, sudeste)
+        hs_cam = wn.nodes.new('ShaderNodeHueSaturation')
+        hs_cam.inputs['Saturation'].default_value = sat_cam
+        wn.links.new(cor_ceu, hs_cam.inputs['Color'])
+        wn.links.new(hs_cam.outputs['Color'], bg_cam.inputs['Color'])
+    else:
+        wn.links.new(cor_ceu, bg_cam.inputs['Color'])
     mix_cam = wn.nodes.new('ShaderNodeMixShader')
     wn.links.new(caminho.outputs['Is Camera Ray'], mix_cam.inputs['Fac'])
     wn.links.new(mix.outputs['Shader'], mix_cam.inputs[1])

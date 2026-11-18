@@ -1912,9 +1912,67 @@ if nevoa > 0 and nevoa_cor is not None:
     so_geo = _math('LESS_THAN')  # o céu (mist = 1) já é o horizonte: não leva véu de novo
     L.new(rl.outputs['Mist'], so_geo.inputs[0])
     so_geo.inputs[1].default_value = 0.999
-    forca_n = _math('MULTIPLY')
-    L.new(rl.outputs['Mist'], forca_n.inputs[0])
-    forca_n.inputs[1].default_value = nevoa
+    forca_n = None
+    # 18/11 — névoa de destaque: em vez de véu pela distância da CÂMERA (que acinzentava o próprio prédio na
+    # aérea, a 150 m), o véu cresce com a distância do TERRENO. O prédio fica limpo e com contraste; o entorno
+    # vai sumindo no ar. Só atrás do prédio (profundidade): o que está entre a câmera e o lote continua nítido.
+    nk = cfg.get('neblina_destaque', {})
+    if LOTE and nk is not False and cfg.get('neblina_modo', 'destaque') == 'destaque':
+        try:
+            sc.view_layers[0].use_pass_position = True
+            sc.view_layers[0].use_pass_z = True
+            def _no(*tipos):
+                for t in tipos:
+                    try:
+                        return N.new(t)
+                    except RuntimeError:
+                        pass
+                raise RuntimeError(tipos)
+            sep = _no('ShaderNodeSeparateXYZ', 'CompositorNodeSeparateXYZ')
+            L.new(rl.outputs['Position'], sep.inputs[0])
+            _lcx, _lcy = (LOTE[0] + LOTE[1]) / 2, (LOTE[2] + LOTE[3]) / 2
+            _lhx, _lhy = (LOTE[1] - LOTE[0]) / 2, (LOTE[3] - LOTE[2]) / 2
+            def _fora(saida, centro, meia):  # quanto o ponto passa da borda do lote nesse eixo (0 dentro)
+                a = _math('SUBTRACT'); L.new(saida, a.inputs[0]); a.inputs[1].default_value = centro
+                b = _math('ABSOLUTE'); L.new(a.outputs[0], b.inputs[0])
+                c = _math('SUBTRACT'); L.new(b.outputs[0], c.inputs[0]); c.inputs[1].default_value = meia
+                d = _math('MAXIMUM'); L.new(c.outputs[0], d.inputs[0]); d.inputs[1].default_value = 0.0
+                e = _math('MULTIPLY'); L.new(d.outputs[0], e.inputs[0]); L.new(d.outputs[0], e.inputs[1])
+                return e.outputs[0]
+            soma = _math('ADD')
+            L.new(_fora(sep.outputs[0], _lcx, _lhx), soma.inputs[0])
+            L.new(_fora(sep.outputs[1], _lcy, _lhy), soma.inputs[1])
+            dist = _math('SQRT'); L.new(soma.outputs[0], dist.inputs[0])
+            ini = nk.get('inicio', 5.0 if ALTO else 10.0)
+            fim = nk.get('fim', 90.0 if ALTO else 140.0)
+            maxi = nk.get('forca', 0.85 if ALTO else 0.65)
+            t = _math('SUBTRACT'); L.new(dist.outputs[0], t.inputs[0]); t.inputs[1].default_value = ini
+            t2 = _math('DIVIDE'); L.new(t.outputs[0], t2.inputs[0]); t2.inputs[1].default_value = max(fim - ini, 1.0)
+            t2.use_clamp = True
+            # suave (3t² − 2t³): começa devagar junto do lote, sem uma borda de véu visível
+            q = _math('MULTIPLY'); L.new(t2.outputs[0], q.inputs[0]); L.new(t2.outputs[0], q.inputs[1])
+            r3 = _math('MULTIPLY_ADD'); L.new(t2.outputs[0], r3.inputs[0]); r3.inputs[1].default_value = -2.0
+            r3.inputs[2].default_value = 3.0
+            liso = _math('MULTIPLY'); L.new(q.outputs[0], liso.inputs[0]); L.new(r3.outputs[0], liso.inputs[1])
+            # portão de profundidade: a câmera até o ponto mais perto do lote; antes disso, nada de véu
+            _dh = math.hypot(max(abs(_c['x'] - _lcx) - _lhx, 0), max(abs(_c['y'] - _lcy) - _lhy, 0))
+            _d0 = 0.85 * _dh
+            g = _math('SUBTRACT'); L.new(rl.outputs['Depth'], g.inputs[0]); g.inputs[1].default_value = _d0
+            g2 = _math('DIVIDE'); L.new(g.outputs[0], g2.inputs[0]); g2.inputs[1].default_value = 0.3 * _dh + 10
+            g2.use_clamp = True
+            forca_n = _math('MULTIPLY'); L.new(liso.outputs[0], forca_n.inputs[0]); L.new(g2.outputs[0], forca_n.inputs[1])
+            forca_k = _math('MULTIPLY'); L.new(forca_n.outputs[0], forca_k.inputs[0]); forca_k.inputs[1].default_value = maxi
+            forca_n = forca_k
+            nevoa = maxi
+            NEBLINA_MODO = 'destaque'
+        except Exception as _e:
+            print('neblina de destaque indisponível, volta à da câmera:', _e)
+            forca_n = None
+    if forca_n is None:
+        NEBLINA_MODO = 'camera'
+        forca_n = _math('MULTIPLY')
+        L.new(rl.outputs['Mist'], forca_n.inputs[0])
+        forca_n.inputs[1].default_value = nevoa
     fator = _math('MULTIPLY')
     L.new(forca_n.outputs[0], fator.inputs[0])
     L.new(so_geo.outputs[0], fator.inputs[1])
@@ -1977,7 +2035,7 @@ print('RESUMO', json.dumps({'materiais': contagem, 'suavizadas': suavizadas, 'fi
                             'pisos_polidos': pisos_polidos, 'pisos_foscos': pisos_foscos, 'spots': spots, 'piso_z': round(z0, 3),
                             'cor': sc.view_settings.view_transform, 'exposicao': round(expo, 2),
                             'balanco': [round(g, 3) for g in ganhos], 'fotometro': medida, 'luz': cfg.get('luz', 'dia'),
-                            'externo': EXTERNO, 'entorno': entorno, 'bairro': bairro, 'quinas': quinas_aplicadas, 'fundos_de_comodo': fundos_de_comodo, 'pecas_ceramicas': pecas_ceramicas, 'fora_do_lote': FORA_DO_LOTE, 'lote': [round(v, 1) for v in LOTE] if LOTE else None, 'rua_entorno': bool(ENTORNO_RUA), 'entorno_real': entorno_real, 'look': sc.view_settings.look, 'transformacao': sc.view_settings.view_transform, 'aguas': aguas, 'folhas': folhas, 'duplicadas': duplicadas, 'alfas_removidos': alfas_removidos, 'recuadas': recuadas, 'faces_duplas': faces_duplas, 'vidros_externos': vidros_externos, 'neblina': nevoa if nevoa_cor is not None else 0, 'alto': ALTO, 'ceu_visto': round(CEU_VISTO, 2), 'sol_azimute': round(luz['azimute'], 1),
+                            'externo': EXTERNO, 'entorno': entorno, 'bairro': bairro, 'quinas': quinas_aplicadas, 'fundos_de_comodo': fundos_de_comodo, 'pecas_ceramicas': pecas_ceramicas, 'fora_do_lote': FORA_DO_LOTE, 'lote': [round(v, 1) for v in LOTE] if LOTE else None, 'rua_entorno': bool(ENTORNO_RUA), 'entorno_real': entorno_real, 'look': sc.view_settings.look, 'transformacao': sc.view_settings.view_transform, 'aguas': aguas, 'folhas': folhas, 'duplicadas': duplicadas, 'alfas_removidos': alfas_removidos, 'recuadas': recuadas, 'faces_duplas': faces_duplas, 'vidros_externos': vidros_externos, 'neblina': nevoa if nevoa_cor is not None else 0, 'neblina_modo': globals().get('NEBLINA_MODO'), 'alto': ALTO, 'ceu_visto': round(CEU_VISTO, 2), 'sol_azimute': round(luz['azimute'], 1),
                             'ceu_forca': ceu_forca and round(ceu_forca, 3),
                             'device': cy.device + ':' + prefs.compute_device_type,
                             'preparo_s': round(t1 - t0, 1), 'render_s': round(time.time() - t1, 1)}))

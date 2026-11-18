@@ -1438,8 +1438,9 @@ if entorno and ENTORNO_REAL.get('feicoes'):
     nzf = ntf.nodes.new('ShaderNodeTexNoise'); nzf.inputs['Scale'].default_value = 2.5; nzf.inputs['Detail'].default_value = 8
     tcf = ntf.nodes.new('ShaderNodeTexCoord'); ntf.links.new(tcf.outputs['Object'], nzf.inputs['Vector'])
     rpf = ntf.nodes.new('ShaderNodeValToRGB')
-    rpf.color_ramp.elements[0].color = (0.025, 0.045, 0.018, 1); rpf.color_ramp.elements.new(0.5).color = (0.05, 0.085, 0.03, 1)
-    rpf.color_ramp.elements[-1].color = (0.1, 0.13, 0.05, 1)
+    # 18/11: copa mais clara (de cima saía uma mancha verde-escura sem forma)
+    rpf.color_ramp.elements[0].color = (0.04, 0.07, 0.025, 1); rpf.color_ramp.elements.new(0.5).color = (0.08, 0.13, 0.045, 1)
+    rpf.color_ramp.elements[-1].color = (0.15, 0.2, 0.07, 1)
     ntf.links.new(nzf.outputs['Fac'], rpf.inputs['Fac']); ntf.links.new(rpf.outputs['Color'], pf.inputs['Base Color'])
     bump_f = ntf.nodes.new('ShaderNodeBump'); bump_f.inputs['Strength'].default_value = 0.6
     ntf.links.new(nzf.outputs['Fac'], bump_f.inputs['Height']); ntf.links.new(bump_f.outputs['Normal'], pf.inputs['Normal'])
@@ -1934,7 +1935,7 @@ if EXTERNO and cfg.get('ceu_foto'):
     # só no que a câmera vê: nos reflexos o céu continua com a força de antes (senão a rua vira espelho de nuvem)
     bg_cam = wn.nodes.new('ShaderNodeBackground')
     bg_cam.inputs['Strength'].default_value = ceu_forca
-    sat_cam = cfg.get('ceu_saturacao_foto', 0.78)
+    sat_cam = cfg.get('ceu_saturacao_foto', 0.62)
     if sat_cam != 1.0:
         # 18/11: o azul do céu saía escuro e saturado demais ao lado do branco do prédio (praça leste, sudeste)
         hs_cam = wn.nodes.new('ShaderNodeHueSaturation')

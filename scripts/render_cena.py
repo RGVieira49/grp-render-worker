@@ -1269,7 +1269,7 @@ if EXTERNO and cotas and cfg.get('entorno', ALTO or FORA_DO_LOTE):
     # terreno vazio de verdade: capim alto, verde com manchas secas (como na foto de satélite)
     _m_campo = _mat_chao('entorno_campo', None, 0.95, 0.12, 0, cores_ramp=[
         (0.06, 0.09, 0.035), (0.45, (0.085, 0.11, 0.045)), (0.7, (0.16, 0.15, 0.08)), (0.2, 0.17, 0.1)])
-    # terreno arado (terra roxa de Maringá) com tufos de capim, como nos lotes vazios em volta (Street View 18/11)
+    # terreno arado (terra roxa) com tufos de capim, como nos lotes vazios em volta (Street View 18/11)
     _m_terra = _mat_chao('entorno_terra', None, 0.97, 0.18, 0, cores_ramp=[
         (0.2, 0.085, 0.045), (0.35, (0.24, 0.1, 0.055)), (0.62, (0.2, 0.11, 0.06)), (0.72, (0.09, 0.11, 0.045)), (0.07, 0.095, 0.04)])
     for _mm in (_m_asf, _m_calc, _m_quadra, _m_campo, _m_terra):

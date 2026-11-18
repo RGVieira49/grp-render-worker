@@ -9,7 +9,7 @@ Entrada do job:
     imagem_url    link https do render (assinado, expira)
     upload_url    link https (assinado, uso único) para devolver o JPEG por PUT
     escala        1.0 a 2.0 (padrão 1.5: 4K → 5760×3240; 2.0 → 8K)
-    forca         intensidade do refino, 0.15 a 0.65 (padrão 0.5, calibrado no Kala em 11/11)
+    forca         intensidade do refino, 0.15 a 0.65 (padrão 0.5, calibrado em 11/11)
     detalhe       força do ControlNet Tile, 0.5 a 1.0 (padrão 0.6)
     guia          CFG, 2 a 10 (padrão 7)
     fidelidade    0 a 1: quanto dos meios-tons volta do render (padrão 0.3; ver recombinar.py)

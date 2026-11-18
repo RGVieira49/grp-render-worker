@@ -1170,6 +1170,7 @@ def dentro_poligono(px, py, pol):
 
 
 CAMPOS = [f_['poligono'] for f_ in ENTORNO_REAL.get('feicoes', []) if f_.get('tipo') == 'campo' and f_.get('poligono')]
+CAMPOS_TERRA = [f_['poligono'] for f_ in ENTORNO_REAL.get('feicoes', []) if f_.get('tipo') == 'campo' and f_.get('poligono') and f_.get('terra')]
 COBERTURA = ENTORNO_REAL.get('cobertura')
 if EXTERNO and LOTE and cfg.get('entorno', ALTO or FORA_DO_LOTE):
     ENTORNO_RUA = _cota_rua_lote()
@@ -1251,7 +1252,8 @@ if EXTERNO and cotas and cfg.get('entorno', ALTO or FORA_DO_LOTE):
                 rua = _faixas(0)
                 calc = not rua and (_faixas(CALC) or (dx <= CALC and dy <= CALC))
                 campo = not rua and not calc and any(dentro_poligono(x, y, pol) for pol in CAMPOS)
-                f.material_index = 0 if rua else (1 if calc else (3 if campo else 2))
+                terra = campo and any(dentro_poligono(x, y, pol) for pol in CAMPOS_TERRA)
+                f.material_index = 0 if rua else (1 if calc else (4 if terra else (3 if campo else 2)))
         # longe (depois da malha): um plano por lado, na cota da borda daquele lado (sem degrau grande)
         _r = cfg.get('entorno_raio', 3000.0)
         for (a0, a1, b0, b1), zl in (((-_r, _r, -_r, ys[0]), Z[:, 0].min()), ((-_r, _r, ys[-1], _r), Z[:, -1].min()),
@@ -1267,7 +1269,10 @@ if EXTERNO and cotas and cfg.get('entorno', ALTO or FORA_DO_LOTE):
     # terreno vazio de verdade: capim alto, verde com manchas secas (como na foto de satélite)
     _m_campo = _mat_chao('entorno_campo', None, 0.95, 0.12, 0, cores_ramp=[
         (0.06, 0.09, 0.035), (0.45, (0.085, 0.11, 0.045)), (0.7, (0.16, 0.15, 0.08)), (0.2, 0.17, 0.1)])
-    for _mm in (_m_asf, _m_calc, _m_quadra, _m_campo):
+    # terreno arado (terra roxa de Maringá) com tufos de capim, como nos lotes vazios em volta (Street View 18/11)
+    _m_terra = _mat_chao('entorno_terra', None, 0.97, 0.18, 0, cores_ramp=[
+        (0.2, 0.085, 0.045), (0.35, (0.24, 0.1, 0.055)), (0.62, (0.2, 0.11, 0.06)), (0.72, (0.09, 0.11, 0.045)), (0.07, 0.095, 0.04)])
+    for _mm in (_m_asf, _m_calc, _m_quadra, _m_campo, _m_terra):
         _me.materials.append(_mm)
     _ob = bpy.data.objects.new('entorno', _me); sc.collection.objects.link(_ob)
     entorno = True
@@ -1440,6 +1445,7 @@ if entorno and ENTORNO_REAL.get('feicoes'):
     ntf.links.new(nzf.outputs['Fac'], bump_f.inputs['Height']); ntf.links.new(bump_f.outputs['Normal'], pf.inputs['Normal'])
     mtr = _mat_simples('real_tronco', (0.18, 0.13, 0.09))
     M_R += [mf, mtr]  # 8 folhas, 9 tronco
+    M_R += [_mat_simples('real_tijolo', (0.36, 0.15, 0.08), 0.9), _mat_simples('real_parede_creme', (0.7, 0.64, 0.52))]  # 10, 11
     bmr = bmesh.new()
     lx0, lx1, ly0, ly1 = LOTE
     RUA_R = cfg.get('rua_largura_extra', 8.0)
@@ -1470,8 +1476,8 @@ if entorno and ENTORNO_REAL.get('feicoes'):
             f.material_index = mi
         return z0_ + h_
 
-    def _telhado(cx, cy, w_, d_, z_, mi, rot=0.0):
-        hr = min(w_, d_) * 0.22
+    def _telhado(cx, cy, w_, d_, z_, mi, rot=0.0, inclinacao=None):
+        hr = min(w_, d_) * (0.22 if inclinacao is None else float(inclinacao))
         res = bmesh.ops.create_cone(bmr, cap_ends=True, cap_tris=False, segments=4, radius1=0.7071, radius2=0.0, depth=1.0,
                                     matrix=Matrix.Translation((cx, cy, z_ + hr / 2)) @ Matrix.Rotation(rot, 4, 'Z') @ Matrix.Diagonal((w_ * 1.08, d_ * 1.08, hr, 1)) @ Matrix.Rotation(math.pi / 4, 4, 'Z'))
         for f in {f for v in res['verts'] for f in v.link_faces}:
@@ -1544,14 +1550,37 @@ if entorno and ENTORNO_REAL.get('feicoes'):
                         _caixa(gx + jx, gy + jy, w_, d_, float(fe.get('altura', 8)), 2)
                         _telhado(gx + jx, gy + jy, w_, d_, cota_entorno(gx + jx, gy + jy) + float(fe.get('altura', 8)), 5)
                     entorno_real[tipo] = entorno_real.get(tipo, 0) + 1
+        elif tipo == 'casa' and fe.get('centro') and fe.get('tamanho'):
+            # uma construção que existe (vista no Street View): posição, tamanho, altura, parede e telhado dela
+            cx, cy = fe['centro']; w_, d_ = fe['tamanho']; rot_ = math.radians(float(fe.get('rotacao', 0)))
+            if not _pode(cx, cy, max(w_, d_) / 2, no_lote):
+                continue
+            PAREDES = {'clara': 0, 'bege': 1, 'cinza': 2, 'creme': 11}
+            TELHAS = {'ceramica': 3, 'cinza': 4, 'fibrocimento': 4, 'metal': 5}
+            z_ = _caixa(cx, cy, w_, d_, float(fe.get('altura', 3.0)), PAREDES.get(fe.get('parede', 'clara'), 0), rot=rot_)
+            if fe.get('telhado', 'cinza') != 'laje':
+                _telhado(cx, cy, w_, d_, z_, TELHAS.get(fe.get('telhado', 'cinza'), 4), rot=rot_, inclinacao=fe.get('inclinacao'))
+            entorno_real['casa'] = entorno_real.get('casa', 0) + 1
+        elif tipo in ('muro', 'mureta') and fe.get('linha'):
+            alt = float(fe.get('altura', 2.4 if tipo == 'muro' else 0.45)); esp = float(fe.get('espessura', 0.15 if tipo == 'muro' else 0.12))
+            mi_m = {'tijolo': 10, 'creme': 11, 'bege': 1, 'clara': 0, 'cinza': 2}.get(fe.get('cor', 'tijolo' if tipo == 'mureta' else 'creme'), 10)
+            for (x1, y1), (x2, y2) in zip(fe['linha'][:-1], fe['linha'][1:]):
+                comp = math.hypot(x2 - x1, y2 - y1)
+                n_ = max(1, int(comp / 6))  # em pedaços: o pedaço que cairia na rua ou na frente da câmera sai
+                for k in range(n_):
+                    ax_, ay_ = x1 + (x2 - x1) * (k + 0.5) / n_, y1 + (y2 - y1) * (k + 0.5) / n_
+                    if not _pode(ax_, ay_, 0.0, no_lote):
+                        continue
+                    _caixa(ax_, ay_, comp / n_, esp, alt, mi_m, rot=math.atan2(y2 - y1, x2 - x1))
+            entorno_real[tipo] = entorno_real.get(tipo, 0) + 1
         elif tipo == 'arvores':
             pts = fe.get('pontos') or (_pontos_da_linha(fe['linha'], fe.get('espaco', 8)) if fe.get('linha') else [])
             r0, r1 = fe.get('raio', [3.5, 5.5])
             for px, py in pts:
                 px, py = px + rng_r.normal(0, 1.0), py + rng_r.normal(0, 1.0)
                 r = rng_r.uniform(r0, r1)
-                if not _pode(px, py, 0.0):
-                    continue  # na calçada pode; no asfalto e dentro do lote, não
+                if not _pode(px, py, 0.0, no_lote):
+                    continue  # na calçada pode; no asfalto e dentro do lote, não (salvo "dentro_do_lote")
                 if math.hypot(px - _c['x'], py - _c['y']) < r + 3:
                     continue
                 _arvore(px, py, r)
